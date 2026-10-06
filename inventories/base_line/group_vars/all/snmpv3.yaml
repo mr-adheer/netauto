@@ -1,0 +1,19 @@
+# group_vars/all/snmpv3.yaml
+snmp_group_name: "SNMP_GroupName"
+snmp_user_name: "SNMPv3_User"
+snmp_host_ip: "10.1.1.120"
+snmp_auth_password: "{{ vault_snmp_auth_password }}"
+snmp_priv_password: "{{ vault_snmp_priv_password }}"
+
+snmp_acl_entries:
+  - sequence: 10
+    grant: permit
+    source:
+      host: 10.1.1.120
+
+cpu_rising_threshold: 80
+cpu_rising_interval: 5
+cpu_falling_threshold: 20
+cpu_falling_interval: 5
+cpu_stats_entry_percentage: 40
+cpu_stats_size: 300

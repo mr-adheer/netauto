@@ -1,0 +1,229 @@
+---
+# =============================================================
+# Device tracking, device sensor, errdisable, CDP/LLDP
+#
+# NETCONF where the YANG model supports it, CLI where it does not.
+#
+# CLI fallback required for:
+#   - device-sensor accounting        (no YANG element)
+#   - cdp run                         (no YANG element - lldp has one, cdp does not)
+#   - errdisable recovery interval    (no YANG element)
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure device tracking and sensor (NETCONF)
+  hosts: access_switches
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure device tracking
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-tracking>
+                <tracking xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-tracking">
+                  <auto-source/>
+                </tracking>
+                <policy xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-tracking">
+                  <word>IPDT_POLICY</word>
+                  <tracking>
+                    <enable-tracking/>
+                  </tracking>
+                  <protocol>
+                    <proto-udp>
+                      <udp>false</udp>
+                    </proto-udp>
+                  </protocol>
+                </policy>
+              </device-tracking>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-tracking/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure device sensor filter lists and specs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-sensor xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-sensor">
+                <notify>
+                  <all-changes/>
+                </notify>
+                <filter-list>
+                  <cdp>
+                    <list>
+                      <name>CDP_LIST</name>
+                      <tlv>
+                        <name>
+                          <device-name/>
+                          <address-type/>
+                          <capabilities-type/>
+                          <platform-type/>
+                          <version-type/>
+                        </name>
+                      </tlv>
+                    </list>
+                  </cdp>
+                  <lldp>
+                    <list>
+                      <name>LLDP_LIST</name>
+                      <tlv>
+                        <name>
+                          <system-name/>
+                          <system-description/>
+                          <system-capabilities/>
+                        </name>
+                      </tlv>
+                    </list>
+                  </lldp>
+                  <dhcp>
+                    <list>
+                      <name>DHCP_LIST</name>
+                      <option>
+                        <name>
+                          <host-name/>
+                          <default-ip-ttl/>
+                          <requested-address/>
+                          <parameter-request-list/>
+                          <class-identifier/>
+                          <client-identifier/>
+                        </name>
+                      </option>
+                    </list>
+                  </dhcp>
+                </filter-list>
+                <filter-spec>
+                  <cdp>
+                    <include>
+                      <list>
+                        <name>CDP_LIST</name>
+                      </list>
+                    </include>
+                  </cdp>
+                  <lldp>
+                    <include>
+                      <list>
+                        <name>LLDP_LIST</name>
+                      </list>
+                    </include>
+                  </lldp>
+                  <dhcp>
+                    <include>
+                      <list>
+                        <name>DHCP_LIST</name>
+                      </list>
+                    </include>
+                  </dhcp>
+                </filter-spec>
+              </device-sensor>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-sensor xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-sensor"/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Enable LLDP globally
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <lldp xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-lldp">
+                <run/>
+              </lldp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <lldp xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-lldp"/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure errdisable recovery causes
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <errdisable>
+                <recovery>
+                  <cause>
+                    <arp-inspection/>
+                    <bpduguard/>
+                    <channel-misconfig/>
+                    <dhcp-rate-limit/>
+                    <dtp-flap/>
+                    <gbic-invalid/>
+                    <inline-power/>
+                    <l2ptguard/>
+                    <link-flap/>
+                    <link-monitor-failure/>
+                  </cause>
+                </recovery>
+              </errdisable>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <errdisable/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure items unsupported by NETCONF (CLI fallback)
+  hosts: access_switches
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    # No YANG element exists for device-sensor accounting.
+    - name: Enable device-sensor accounting
+      cisco.ios.ios_config:
+        lines:
+          - device-sensor accounting
+
+    # cdp has no YANG element (lldp does, cdp does not).
+    - name: Enable CDP globally
+      cisco.ios.ios_config:
+        lines:
+          - cdp run
+
+    # "errdisable recovery cause all" and the interval are not
+    # represented in the model - only individual causes are.
+    - name: Configure errdisable recovery cause all and interval
+      cisco.ios.ios_config:
+        lines:
+          - errdisable recovery cause all
+          - "errdisable recovery interval {{ errdisable_recovery_interval }}"
+

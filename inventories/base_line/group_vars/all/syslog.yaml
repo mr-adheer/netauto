@@ -1,0 +1,12 @@
+# group_vars/all/syslog.yaml
+syslog_servers:
+  - address: 1.1.1.1
+    protocol: udp
+    port: 514
+  - address: 1.1.1.2
+    protocol: udp
+    port: 514
+
+logging_buffer_size: 10485760
+logging_trap_level: informational
+logging_source_interface: vlan100

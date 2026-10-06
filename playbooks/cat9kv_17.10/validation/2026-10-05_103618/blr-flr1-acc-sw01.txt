@@ -1,0 +1,23 @@
+=======================================================================
+blr-flr1-acc-sw01
+=======================================================================
+Address   : 10.10.10.5
+Model     : C9KV-UADP-8P
+Serial    : 9M2ST6PVKOA
+Version   : 17.10.1prd7
+Image     : bootflash:packages.conf
+Uptime    : 1 hour, 34 minutes
+Reg       : 0x2102
+Last boot : Critical process run_cima_sh fault on fp_0_0 (rc=139), system report at bootflash:core/Switch-system-report_20260922-115344-UTC.tar.gz
+Run       : 2026-10-05 10:36:18 UTC
+
+RESULT    : PASS
+Checks    : 1 of 1 passed
+
+-----------------------------------------------------------------------
+ALL CHECKS
+-----------------------------------------------------------------------
+[ hostname ]
+  PASS  hostname                      blr-flr1-acc-sw01
+
+=======================================================================

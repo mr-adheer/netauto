@@ -1,0 +1,155 @@
+---
+# =============================================================
+# NTP - NETCONF
+#
+# Authenticated or unauthenticated, decided by:
+#   ntp_authentication_enabled: true | false
+# in group_vars.
+#
+# Set it to false only for clients who cannot supply an NTP
+# authentication key. Authenticated is the standard.
+#
+# The interface source is supplied as two variables:
+#   ntp_source_interface_type:   "Vlan"
+#   ntp_source_interface_number: "100"
+# producing <source><Vlan>100</Vlan></source>
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+- name: Configure NTP (NETCONF)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    # ---------------------------------------------------------
+    # The peer ACL is the same either way.
+    # ---------------------------------------------------------
+    - name: Configure the NTP peer ACL
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list>
+                  <standard xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-acl">
+                    <name>NTP_ACL</name>
+                    {% for ace in ntp_acl_entries %}
+                    <access-list-seq-rule>
+                      <sequence>{{ ace.sequence }}</sequence>
+                      <{{ ace.grant }}>
+                        <std-ace>
+                          {% if ace.source.any is defined %}
+                          <any/>
+                          {% else %}
+                          <host>{{ ace.source.host }}</host>
+                          {% endif %}
+                        </std-ace>
+                      </{{ ace.grant }}>
+                    </access-list-seq-rule>
+                    {% endfor %}
+                  </standard>
+                </access-list>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    # ---------------------------------------------------------
+    # WITH authentication
+    # ---------------------------------------------------------
+    - name: Configure NTP with authentication
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ntp>
+                <authenticate xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp"/>
+                <authentication-key xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <number>1</number>
+                  <md5-cfg>{{ ntp_settings_auth.key }}</md5-cfg>
+                  <encryption-type>0</encryption-type>
+                </authentication-key>
+                <trusted-key xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <number>1</number>
+                </trusted-key>
+                <server xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  {% for server in ntp_settings_auth.servers %}
+                  <server-list>
+                    <ip-address>{{ server.ip }}</ip-address>
+                    <key>1</key>
+                  </server-list>
+                  {% endfor %}
+                </server>
+                <source xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <{{ ntp_source_interface_type }}>{{ ntp_source_interface_number }}</{{ ntp_source_interface_type }}>
+                </source>
+                <access-group xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <peer>
+                    <acl>NTP_ACL</acl>
+                  </peer>
+                </access-group>
+              </ntp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ntp/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      when: ntp_authentication_enabled
+      no_log: true
+
+    # ---------------------------------------------------------
+    # WITHOUT authentication
+    # ---------------------------------------------------------
+    - name: Configure NTP without authentication
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ntp>
+                <server xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  {% for server in ntp_settings_no_auth.servers %}
+                  <server-list>
+                    <ip-address>{{ server.ip }}</ip-address>
+                  </server-list>
+                  {% endfor %}
+                </server>
+                <source xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <{{ ntp_source_interface_type }}>{{ ntp_source_interface_number }}</{{ ntp_source_interface_type }}>
+                </source>
+                <access-group xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ntp">
+                  <peer>
+                    <acl>NTP_ACL</acl>
+                  </peer>
+                </access-group>
+              </ntp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ntp/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      when: not ntp_authentication_enabled

@@ -1,0 +1,3 @@
+# group_vars/switches/vtp.yaml
+vtp_mode: "transparent"
+vtp_domain_name: "VTPDOM"

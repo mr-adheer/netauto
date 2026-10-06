@@ -1,0 +1,2 @@
+# group_vars/all/org_info.yaml (shared across every device/client engagement folder)
+org_name: "Client_Name"

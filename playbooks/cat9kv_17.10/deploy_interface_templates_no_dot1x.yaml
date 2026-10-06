@@ -1,0 +1,294 @@
+---
+# =============================================================================
+# deploy_interface_templates_no_dot1x.yaml
+#
+#   ansible-playbook deploy_interface_templates_no_dot1x.yaml
+#       -> validate only
+#   ansible-playbook deploy_interface_templates_no_dot1x.yaml --tags deploy
+#       -> deploy, then validate
+#
+# NETCONF where the YANG model supports it, CLI where it does not.
+# The two original plays are merged into one; each task carries its own
+# connection settings.
+#
+# Two things to note:
+#
+# 1. storm-control thresholds are DECIMALS in the model ("10.0", not "10").
+#    This is how the device stores them.
+#
+# 2. "spanning-tree guard loop" does NOT appear under any template in the
+#    model, even though TRUNK_UPLINK has it in the CLI config. It is
+#    deployed over CLI.
+#
+# VALIDATION
+#   Each template is read as its own section, so a line found under one
+#   template cannot satisfy a check for another. The CLI renders the
+#   decimal thresholds as plain integers, which is why the checks below
+#   use "level 10" rather than "level 10.0".
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
+
+- name: Configure and validate interface templates
+  hosts: access_switches
+  gather_facts: false
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: Configure interface templates
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <template>
+
+                <template_details xmlns="http://cisco.com/ns/yang/ios-xe/template">
+                  <template_name>TRUNK_FLEX_AP</template_name>
+                  <switchport>
+                    <mode>
+                      <trunk/>
+                    </mode>
+                    <nonegotiate/>
+                  </switchport>
+                  <storm-control>
+                    <broadcast>
+                      <level>
+                        <threshold>10.0</threshold>
+                      </level>
+                    </broadcast>
+                    <multicast>
+                      <level>
+                        <threshold>10.0</threshold>
+                      </level>
+                    </multicast>
+                    <action>
+                      <trap/>
+                    </action>
+                  </storm-control>
+                </template_details>
+
+                <template_details xmlns="http://cisco.com/ns/yang/ios-xe/template">
+                  <template_name>TRUNK_UPLINK</template_name>
+                  <switchport>
+                    <mode>
+                      <trunk/>
+                    </mode>
+                    <nonegotiate/>
+                  </switchport>
+                  <storm-control>
+                    <broadcast>
+                      <level>
+                        <threshold>10.0</threshold>
+                      </level>
+                    </broadcast>
+                    <multicast>
+                      <level>
+                        <threshold>10.0</threshold>
+                      </level>
+                    </multicast>
+                    <action>
+                      <trap/>
+                    </action>
+                  </storm-control>
+                  <ip>
+                    <dhcp>
+                      <snooping>
+                        <trust/>
+                      </snooping>
+                    </dhcp>
+                  </ip>
+                </template_details>
+
+                <template_details xmlns="http://cisco.com/ns/yang/ios-xe/template">
+                  <template_name>ACCESS_PORT</template_name>
+                  <switchport>
+                    <mode>
+                      <access/>
+                    </mode>
+                    <nonegotiate/>
+                    <port-security>
+                      <aging>
+                        <time>2</time>
+                        <type>
+                          <inactivity/>
+                        </type>
+                      </aging>
+                      <maximum>
+                        <range>
+                          <range>3</range>
+                        </range>
+                      </maximum>
+                      <violation>
+                        <restrict/>
+                      </violation>
+                    </port-security>
+                  </switchport>
+                  <spanning-tree>
+                    <bpduguard>
+                      <enable/>
+                    </bpduguard>
+                    <portfast>
+                    </portfast>
+                  </spanning-tree>
+                  <storm-control>
+                    <broadcast>
+                      <level>
+                        <threshold>1.0</threshold>
+                      </level>
+                    </broadcast>
+                    <multicast>
+                      <level>
+                        <threshold>1.0</threshold>
+                      </level>
+                    </multicast>
+                    <action>
+                      <trap/>
+                    </action>
+                  </storm-control>
+                  <load-interval>60</load-interval>
+                  <ip>
+                    <dhcp>
+                      <snooping>
+                        <limit>
+                          <rate>15</rate>
+                        </limit>
+                      </snooping>
+                    </dhcp>
+                  </ip>
+                  <device-tracking>
+                    <attach-policy>
+                      <policy-name>
+                        <policy-name>IPDT_POLICY</policy-name>
+                      </policy-name>
+                    </attach-policy>
+                  </device-tracking>
+                </template_details>
+
+              </template>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <template/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    # "spanning-tree guard loop" does not appear under any template in the
+    # YANG model, so it is applied over CLI.
+    - name: Add loop guard to the uplink template
+      cisco.ios.ios_config:
+        lines:
+          - spanning-tree guard loop
+        parents: template TRUNK_UPLINK
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: Read each template as its own section
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | section ^template TRUNK_FLEX_AP
+          - show running-config all | section ^template TRUNK_UPLINK
+          - show running-config all | section ^template ACCESS_PORT
+      register: tmpl_read
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    - name: Store each section as trimmed lines
+      set_fact:
+        flex_ap_lines: "{{ tmpl_read.stdout_lines[0] | map('trim') | list }}"
+        uplink_lines: "{{ tmpl_read.stdout_lines[1] | map('trim') | list }}"
+        access_lines: "{{ tmpl_read.stdout_lines[2] | map('trim') | list }}"
+      tags: [validate, always]
+
+    - name: Define what should be in each template
+      set_fact:
+        tmpl_checks:
+          # --- TRUNK_FLEX_AP ---
+          - { tmpl: "TRUNK_FLEX_AP", line: "template TRUNK_FLEX_AP" }
+          - { tmpl: "TRUNK_FLEX_AP", line: "switchport mode trunk" }
+          - { tmpl: "TRUNK_FLEX_AP", line: "switchport nonegotiate" }
+          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control broadcast level 10.00" }
+          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control multicast level 10.00" }
+          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control action trap" }
+          # --- TRUNK_UPLINK ---
+          - { tmpl: "TRUNK_UPLINK", line: "template TRUNK_UPLINK" }
+          - { tmpl: "TRUNK_UPLINK", line: "switchport mode trunk" }
+          - { tmpl: "TRUNK_UPLINK", line: "switchport nonegotiate" }
+          - { tmpl: "TRUNK_UPLINK", line: "storm-control broadcast level 10.00" }
+          - { tmpl: "TRUNK_UPLINK", line: "storm-control multicast level 10.00" }
+          - { tmpl: "TRUNK_UPLINK", line: "storm-control action trap" }
+          - { tmpl: "TRUNK_UPLINK", line: "ip dhcp snooping trust" }
+          - { tmpl: "TRUNK_UPLINK", line: "spanning-tree guard loop" }
+          # --- ACCESS_PORT ---
+          - { tmpl: "ACCESS_PORT", line: "template ACCESS_PORT" }
+          - { tmpl: "ACCESS_PORT", line: "switchport mode access" }
+          - { tmpl: "ACCESS_PORT", line: "switchport nonegotiate" }
+          - { tmpl: "ACCESS_PORT", line: "switchport port-security maximum 3" }
+          - { tmpl: "ACCESS_PORT", line: "switchport port-security aging time 2" }
+          - { tmpl: "ACCESS_PORT", line: "switchport port-security aging type inactivity" }
+          - { tmpl: "ACCESS_PORT", line: "switchport port-security violation restrict" }
+          - { tmpl: "ACCESS_PORT", line: "spanning-tree portfast" }
+          - { tmpl: "ACCESS_PORT", line: "spanning-tree bpduguard enable" }
+          - { tmpl: "ACCESS_PORT", line: "storm-control broadcast level 1.00" }
+          - { tmpl: "ACCESS_PORT", line: "storm-control multicast level 1.00" }
+          - { tmpl: "ACCESS_PORT", line: "storm-control action trap" }
+          - { tmpl: "ACCESS_PORT", line: "load-interval 60" }
+          - { tmpl: "ACCESS_PORT", line: "ip dhcp snooping limit rate 15" }
+          - { tmpl: "ACCESS_PORT", line: "device-tracking attach-policy IPDT_POLICY" }
+      tags: [validate, always]
+
+    - name: Evaluate the checks
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'interface templates',
+               'check':    item.tmpl ~ ' / ' ~ item.line,
+               'expected': 'present',
+               'actual':   'present' if item.line in haystack else 'missing',
+               'result':   'PASS' if item.line in haystack else 'FAIL'
+             }] }}
+      vars:
+        haystack: >-
+          {{ flex_ap_lines if item.tmpl == 'TRUNK_FLEX_AP'
+             else uplink_lines if item.tmpl == 'TRUNK_UPLINK'
+             else access_lines }}
+      loop: "{{ tmpl_checks }}"
+      loop_control:
+        label: "{{ item.tmpl }} / {{ item.line }}"
+      tags: [validate, always]
+
+    - name: Report
+      debug:
+        msg: >-
+          {{ 'PASS' if tmpl_failed | length == 0 else 'FAIL' }}
+          ---> interface templates:
+          {{ tmpl_checks | length - tmpl_failed | length }}
+          of {{ tmpl_checks | length }} present
+          {{ '' if tmpl_failed | length == 0
+             else '- missing: ' + (tmpl_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        tmpl_failed: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'interface templates')
+             | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: tmpl_failed | length > 0
+      tags: [validate, always]

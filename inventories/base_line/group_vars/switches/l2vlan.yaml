@@ -1,0 +1,5 @@
+layer2_vlans:
+  - vlan_id: 10
+    name: vlanten
+  - vlan_id: 20
+    name: vlantwenty

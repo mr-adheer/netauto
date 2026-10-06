@@ -1,0 +1,29 @@
+# group_vars/all/mgmt_acl.yaml
+mgmt_acl_entries:
+  - sequence: 10
+    grant: permit
+    source:
+      address: 10.0.0.0
+      wildcard_bits: 0.255.255.255
+    log:
+      set: true
+  - sequence: 20
+    grant: permit
+    source:
+      address: 172.16.0.0
+      wildcard_bits: 0.0.31.255
+    log:
+      set: true
+  - sequence: 39
+    grant: permit
+    source:
+      address: 192.168.0.0
+      wildcard_bits: 0.0.255.255
+    log:
+      set: true
+  - sequence: 100
+    grant: deny
+    source:
+      any: true
+    log:
+      set: true

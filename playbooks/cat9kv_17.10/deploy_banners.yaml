@@ -1,0 +1,162 @@
+---
+# =============================================================================
+# deploy_banners.yaml
+#
+#   ansible-playbook deploy_banners.yaml                 -> validate only
+#   ansible-playbook deploy_banners.yaml --tags deploy   -> deploy, then validate
+#
+# Banners are fully supported by the YANG model, so no CLI fallback is needed.
+# Structure verified against a real device dump.
+#
+# IMPORTANT: "<" and ">" inside the banner text must be XML-escaped as &lt;
+# and &gt;. The device stores and displays them as normal angle brackets.
+#
+# $(hostname) and $(line) are Cisco banner tokens, expanded by the device at
+# display time. They pass through as literal text.
+#
+# VALIDATION
+#   Checks only that a banner is configured, not that its text is correct.
+#   Comparing the text is brittle - whitespace, XML escaping and the $(hostname)
+#   tokens all differ between what is sent and what the device returns.
+# =============================================================================
+
+- name: Configure and validate banners
+  hosts: access_switches
+  gather_facts: false
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: Configure exec and login banners
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <banner>
+                <exec>
+                  <banner>
+          |===============================  N O T I C E  ==============================
+          |
+          |
+          |          YOU ARE LOGGED IN TO DEVICE THAT BELONGS TO {{ org_name }}
+          |
+          |
+          |          ------&gt;&gt;   $(hostname) on line-VTY/TTY $(line)  &lt;&lt;-------
+          |
+          |
+          |
+          |         *** ACCESS TO THIS SYSTEM IS PROHIBITED UNLESS AUTHORISED ***
+          |
+          |        If you are not authorised please disconnect now. Any attempt for
+          |        unauthorized access will be logged and appropriate legal action
+          |        will be taken.
+          |
+          |
+          |============================================================================
+                  </banner>
+                </exec>
+                <login>
+                  <banner>
+          |============================================================================
+          |
+          |                               W A R N I N G
+          |                               =============
+          |
+          |                          READ BEFORE PROCEEDING
+          |
+          |
+          |         THIS SYSTEM IS THE PROPRITORY OF {{ org_name }}.
+          |
+          |         THIS SYSTEM IS FOR AUTHORISED USERS ONLY.
+          |         UNAUTHORIZED ACCESS IS PROHIBITED.
+          |
+          |         YOUR ACCESS IS MONITORED FOR COMPLIANCE TO IT POLICY.
+          |
+          |         UNAUTHORIZED ACCESS WILL RESULT IN ACTION AS PER IT POLICY AND LAW
+          |
+          |============================================================================
+                  </banner>
+                </login>
+              </banner>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <banner/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags:
+        - deploy
+        - never
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    #
+    # Checks only that a banner exists, not that its text is correct.
+    # "show banner exec" and "show banner login" return the configured text,
+    # or nothing at all if no banner is set.
+    # =========================================================================
+    - name: Read the banners back
+      cisco.ios.ios_command:
+        commands:
+          - show banner exec
+          - show banner login
+      register: banner_read
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags:
+        - validate
+        - always
+
+    - name: Record the results in memory
+      set_fact:
+        exec_banner_ok: "{{ (banner_read.stdout[0] | default('') | trim) | length > 0 }}"
+        login_banner_ok: "{{ (banner_read.stdout[1] | default('') | trim) | length > 0 }}"
+      tags:
+        - validate
+        - always
+
+    - name: Report
+      debug:
+        msg: >-
+          {{ 'PASS' if (exec_banner_ok | bool and login_banner_ok | bool) else 'FAIL' }}
+          ---> banners:
+          exec={{ 'present' if exec_banner_ok | bool else 'MISSING' }},
+          login={{ 'present' if login_banner_ok | bool else 'MISSING' }}
+      changed_when: not (exec_banner_ok | bool and login_banner_ok | bool)
+      tags:
+        - validate
+        - always
+
+    - name: Record the result
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [
+               {
+                 'feature':  'banners',
+                 'check':    'exec banner',
+                 'expected': 'present',
+                 'actual':   'present' if exec_banner_ok | bool else 'missing',
+                 'result':   'PASS' if exec_banner_ok | bool else 'FAIL'
+               },
+               {
+                 'feature':  'banners',
+                 'check':    'login banner',
+                 'expected': 'present',
+                 'actual':   'present' if login_banner_ok | bool else 'missing',
+                 'result':   'PASS' if login_banner_ok | bool else 'FAIL'
+               }
+             ] }}
+      tags:
+        - validate
+        - always

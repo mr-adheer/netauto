@@ -1,0 +1,214 @@
+---
+# =============================================================
+# SNMPv3 - NETCONF where supported, CLI where not
+#
+# Structure verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# CLI fallback required for:
+#   - snmp-server user         (SNMPv3 users are not represented
+#                               in the YANG model at all)
+#   - snmp mib flash cache     (no element)
+#   - process cpu statistics limit  (no element)
+#   - snmp-server enable traps      (the model enumerates every
+#                               individual trap; the CLI form
+#                               "enable traps" with no argument
+#                               enables the lot and is simpler)
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure SNMPv3 (NETCONF)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure the SNMP access ACL
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list>
+                  <standard xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-acl">
+                    <name>SNMP_ACL</name>
+                    {% for ace in snmp_acl_entries %}
+                    <access-list-seq-rule>
+                      <sequence>{{ ace.sequence }}</sequence>
+                      <{{ ace.grant }}>
+                        <std-ace>
+                          {% if ace.source.any is defined %}
+                          <any/>
+                          {% else %}
+                          <host>{{ ace.source.host }}</host>
+                          {% endif %}
+                          <log/>
+                        </std-ace>
+                      </{{ ace.grant }}>
+                    </access-list-seq-rule>
+                    {% endfor %}
+                  </standard>
+                </access-list>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure SNMP group, host, location and trap source
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <snmp-server>
+                <group xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-snmp">
+                  <id>{{ snmp_group_name }}</id>
+                  <v3>
+                    <security-level-list>
+                      <security-level>priv</security-level>
+                      <access-config>
+                        <standard-acl>SNMP_ACL</standard-acl>
+                      </access-config>
+                    </security-level-list>
+                  </v3>
+                </group>
+                <host-config xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-snmp">
+                  <ip-community>
+                    <ip-address>{{ snmp_host_ip }}</ip-address>
+                    <community-or-user>{{ snmp_user_name }}</community-or-user>
+                    <version>3</version>
+                    <security-level>priv</security-level>
+                  </ip-community>
+                </host-config>
+                <location xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-snmp">{{ snmp_location }}</location>
+                <trap-source xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-snmp">
+                  <{{ snmp_trap_source_type }}>{{ snmp_trap_source_number }}</{{ snmp_trap_source_type }}>
+                </trap-source>
+              </snmp-server>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <snmp-server/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure SNMP ifindex persistence
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <snmp>
+                <ifmib xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-snmp">
+                  <ifindex>
+                    <persist/>
+                  </ifindex>
+                </ifmib>
+              </snmp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <snmp/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure the CPU threshold
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <process>
+                <cpu>
+                  <threshold>
+                    <type>
+                      <total>
+                        <rising>
+                          <cpu-range>
+                            <cpu-range>{{ cpu_rising_threshold }}</cpu-range>
+                            <interval>
+                              <cpu-range>
+                                <cpu-range>{{ cpu_rising_interval }}</cpu-range>
+                                <falling>
+                                  <cpu-range>
+                                    <cpu-range>{{ cpu_falling_threshold }}</cpu-range>
+                                    <interval>{{ cpu_falling_interval }}</interval>
+                                  </cpu-range>
+                                </falling>
+                              </cpu-range>
+                            </interval>
+                          </cpu-range>
+                        </rising>
+                      </total>
+                    </type>
+                  </threshold>
+                </cpu>
+              </process>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <process/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure SNMP items not in the YANG model (CLI)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    # SNMPv3 users are not represented in the YANG model, and do
+    # not appear in "show running-config" either - use
+    # "show snmp user" to verify.
+    - name: Configure the SNMPv3 user
+      cisco.ios.ios_config:
+        lines:
+          - "snmp-server user {{ snmp_user_name }} {{ snmp_group_name }} v3 auth sha {{ snmp_auth_password }} priv aes 128 {{ snmp_priv_password }}"
+      no_log: true
+
+    # The model enumerates every individual trap; the bare CLI
+    # form enables them all and is far simpler.
+    - name: Enable SNMP traps
+      cisco.ios.ios_config:
+        lines:
+          - snmp-server enable traps
+          - snmp-server enable traps cpu threshold
+
+    # No YANG elements for these two.
+    - name: Configure MIB flash cache and CPU statistics limit
+      cisco.ios.ios_config:
+        lines:
+          - snmp mib flash cache
+          - "process cpu statistics limit entry-percentage {{ cpu_stats_entry_percentage }} size {{ cpu_stats_size }}"

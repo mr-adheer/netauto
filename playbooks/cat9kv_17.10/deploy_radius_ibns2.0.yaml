@@ -1,0 +1,727 @@
+---
+# =============================================================
+# RADIUS / IBNS 2.0 - NETCONF
+#
+# ONLY use this on IOS-XE 17.12.6 / 17.16.1 or later.
+#
+# On earlier releases, Cisco bug CSCwk31014 means the
+# "class-map type control subscriber match-none" in this config
+# breaks NETCONF get-config - and since netconf_config reads
+# before it writes, no get_filter can work around it here
+# (the broken element IS what this playbook configures).
+# Use the CLI version on affected releases.
+#
+# The class-map and policy-map XML below was extracted verbatim
+# from a real device (show running-config | format netconf-xml),
+# so the structure is verified rather than hand-written.
+# =============================================================
+
+- name: Configure RADIUS and IBNS 2.0 (NETCONF)
+  hosts: access_switches
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure RADIUS servers
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius>
+                {% for s in radius_servers %}
+                <server xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <id>RADIUS_{{ s.ip }}</id>
+                  <address>
+                    <ipv4>{{ s.ip }}</ipv4>
+                    <auth-port>{{ s.auth_port }}</auth-port>
+                    <acct-port>{{ s.acct_port }}</acct-port>
+                  </address>
+                  <timeout>{{ s.timeout }}</timeout>
+                  <retransmit>{{ s.retransmit }}</retransmit>
+                  <automate-tester>
+                    <username>{{ radius_tester_username }}</username>
+                    <ignore-acct-port/>
+                  </automate-tester>
+                  <pac>
+                    <key>
+                      <encryption>0</encryption>
+                      <key>{{ radius_shared_key }}</key>
+                    </key>
+                  </pac>
+                </server>
+                {% endfor %}
+              </radius>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      no_log: true
+
+    - name: Configure RADIUS server global attributes
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius-server>
+                <dead-criteria xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <time>5</time>
+                  <tries>3</tries>
+                </dead-criteria>
+                <deadtime xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">{{ radius_deadtime }}</deadtime>
+                <load-balance xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <method>
+                    <least-outstanding/>
+                  </method>
+                </load-balance>
+              </radius-server>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius-server/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure subscriber class maps
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <policy>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>AAA_SVR_DOWN_AUTHD_HOST</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <authorization-status>
+                      <authorized/>
+                    </authorization-status>
+                    <result-type>
+                      <aaa-timeout/>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>AAA_SVR_DOWN_UNAUTHD_HOST</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <authorization-status>
+                      <unauthorized/>
+                    </authorization-status>
+                    <result-type>
+                      <aaa-timeout/>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>AUTHC_SUCCESS-AUTHZ_FAIL</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <authorization-status>
+                      <unauthorized/>
+                    </authorization-status>
+                    <result-type>
+                      <success/>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>DOT1X</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <dot1x/>
+                    </method>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>DOT1X_FAILED</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <dot1x/>
+                    </method>
+                    <result-type>
+                      <method>
+                        <dot1x>
+                          <authoritative/>
+                        </dot1x>
+                      </method>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>DOT1X_NO_RESP</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <dot1x/>
+                    </method>
+                    <result-type>
+                      <method>
+                        <dot1x>
+                          <agent-not-found/>
+                        </dot1x>
+                      </method>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>DOT1X_TIMEOUT</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <dot1x/>
+                    </method>
+                    <result-type>
+                      <method>
+                        <dot1x>
+                          <method-timeout/>
+                        </dot1x>
+                      </method>
+                      <method-timeout/>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>IN_CRITICAL_AUTH</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-any</prematch>
+                  <match>
+                    <activated-service-template>
+                      <service-name>CRITICAL_DATA_ACCESS</service-name>
+                    </activated-service-template>
+                    <activated-service-template>
+                      <service-name>CRITICAL_VOICE_ACCESS</service-name>
+                    </activated-service-template>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>MAB</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <mab/>
+                    </method>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>MAB_FAILED</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-all</prematch>
+                  <match>
+                    <method>
+                      <mab/>
+                    </method>
+                    <result-type>
+                      <method>
+                        <mab>
+                          <authoritative/>
+                        </mab>
+                      </method>
+                    </result-type>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>NOT_IN_CRITICAL_AUTH</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <prematch>match-none</prematch>
+                  <match>
+                    <activated-service-template>
+                      <service-name>CRITICAL_DATA_ACCESS</service-name>
+                    </activated-service-template>
+                    <activated-service-template>
+                      <service-name>CRITICAL_VOICE_ACCESS</service-name>
+                    </activated-service-template>
+                  </match>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>non-client-nrt-class</name>
+                  <prematch>match-any</prematch>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-default</name>
+                  <prematch>match-any</prematch>
+                  <description>EWLC control, EWLC data, Inter FED</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-data</name>
+                  <prematch>match-any</prematch>
+                  <description>ICMP redirect, ICMP_GEN and BROADCAST</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-dhcp-snooping</name>
+                  <prematch>match-any</prematch>
+                  <description>DHCP snooping</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-dot1x-auth</name>
+                  <prematch>match-any</prematch>
+                  <description>DOT1X Auth</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-forus</name>
+                  <prematch>match-any</prematch>
+                  <description>Forus Address resolution and Forus traffic</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-l2-control</name>
+                  <prematch>match-any</prematch>
+                  <description>L2 control</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-l2lvx-control</name>
+                  <prematch>match-any</prematch>
+                  <description>L2 LVX control packets</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-multicast</name>
+                  <prematch>match-any</prematch>
+                  <description>Transit Traffic and MCAST Data</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-multicast-end-station</name>
+                  <prematch>match-any</prematch>
+                  <description>MCAST END STATION</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-protocol-snooping</name>
+                  <prematch>match-any</prematch>
+                  <description>Protocol snooping</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-punt-webauth</name>
+                  <prematch>match-any</prematch>
+                  <description>Punt Webauth</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-routing-control</name>
+                  <prematch>match-any</prematch>
+                  <description>Routing control and Low Latency</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-stackwise-virt-control</name>
+                  <prematch>match-any</prematch>
+                  <description>Stackwise Virtual</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-sw-forward</name>
+                  <prematch>match-any</prematch>
+                  <description>Sw forwarding, L2 LVX data, LOGGING</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-sys-data</name>
+                  <prematch>match-any</prematch>
+                  <description>Learning cache ovfl, High Rate App, Exception, EGR Exception, NFL SAMPLED DATA, RPF Failed</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-system-critical</name>
+                  <prematch>match-any</prematch>
+                  <description>System Critical and Gold Pkt</description>
+                </class-map>
+                <class-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>system-cpp-police-topology-control</name>
+                  <prematch>match-any</prematch>
+                  <description>Topology control</description>
+                </class-map>
+              </policy>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <policy/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure the dot1x/MAB subscriber policy map
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <policy>
+                <policy-map xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-policy">
+                  <name>DOT1X_MAB_POLICY</name>
+                  <type>control</type>
+                  <subscriber/>
+                  <event>
+                    <event-type>session-started</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <authenticate>
+                          <using>
+                            <method>dot1x</method>
+                            <priority>10</priority>
+                          </using>
+                        </authenticate>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>authentication-failure</event-type>
+                    <match-type>match-first</match-type>
+                    <class-number>
+                      <number>5</number>
+                      <class>DOT1X_FAILED</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>dot1x</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authenticate>
+                          <using>
+                            <method>mab</method>
+                            <priority>20</priority>
+                          </using>
+                        </authenticate>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>10</number>
+                      <class>AAA_SVR_DOWN_UNAUTHD_HOST</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <clear-authenticated-data-hosts-on-port/>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <activate>
+                          <service-template-config>
+                            <service-template>CRITICAL_DATA_ACCESS</service-template>
+                          </service-template-config>
+                        </activate>
+                      </action-number>
+                      <action-number>
+                        <number>30</number>
+                        <activate>
+                          <service-template-config>
+                            <service-template>CRITICAL_VOICE_ACCESS</service-template>
+                          </service-template-config>
+                        </activate>
+                      </action-number>
+                      <action-number>
+                        <number>40</number>
+                        <authorize/>
+                      </action-number>
+                      <action-number>
+                        <number>50</number>
+                        <pause>
+                          <reauthentication/>
+                        </pause>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>20</number>
+                      <class>AAA_SVR_DOWN_AUTHD_HOST</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <pause>
+                          <reauthentication/>
+                        </pause>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authorize/>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>30</number>
+                      <class>DOT1X_NO_RESP</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>dot1x</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authenticate>
+                          <using>
+                            <method>mab</method>
+                            <priority>20</priority>
+                          </using>
+                        </authenticate>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>40</number>
+                      <class>DOT1X_TIMEOUT</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>dot1x</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authenticate>
+                          <using>
+                            <method>mab</method>
+                            <priority>20</priority>
+                          </using>
+                        </authenticate>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>50</number>
+                      <class>MAB_FAILED</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>mab</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authentication-restart>60</authentication-restart>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>60</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>dot1x</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <terminate-config>mab</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>30</number>
+                        <authentication-restart>60</authentication-restart>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>agent-found</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <terminate-config>mab</terminate-config>
+                      </action-number>
+                      <action-number>
+                        <number>20</number>
+                        <authenticate>
+                          <using>
+                            <method>dot1x</method>
+                            <priority>10</priority>
+                          </using>
+                        </authenticate>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>aaa-available</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>IN_CRITICAL_AUTH</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <clear-session/>
+                      </action-number>
+                    </class-number>
+                    <class-number>
+                      <number>20</number>
+                      <class>NOT_IN_CRITICAL_AUTH</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <resume>
+                          <reauthentication/>
+                        </resume>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>inactivity-timeout</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <clear-session/>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>authentication-success</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <activate>
+                          <service-template-config>
+                            <service-template>DEFAULT_LINKSEC_POLICY_SHOULD_SECURE</service-template>
+                          </service-template-config>
+                        </activate>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>violation</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>always</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <restrict/>
+                      </action-number>
+                    </class-number>
+                  </event>
+                  <event>
+                    <event-type>authorization-failure</event-type>
+                    <match-type>match-all</match-type>
+                    <class-number>
+                      <number>10</number>
+                      <class>AUTHC_SUCCESS-AUTHZ_FAIL</class>
+                      <execution-type>do-until-failure</execution-type>
+                      <action-number>
+                        <number>10</number>
+                        <authentication-restart>60</authentication-restart>
+                      </action-number>
+                    </class-number>
+                  </event>
+                </policy-map>
+              </policy>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <policy/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# CLI fallback - these have no YANG representation
+# -------------------------------------------------------------
+- name: Configure IBNS items not in the YANG model (CLI)
+  hosts: access_switches
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    - name: Configure the RADIUS server group and dynamic author
+      cisco.ios.ios_config:
+        lines: "{{ ['server name RADIUS_' + item.ip for item in radius_servers]
+                   + ['ip radius source-interface ' + radius_source_interface,
+                      'deadtime ' + (radius_deadtime | string)] }}"
+        parents: aaa group server radius RADIUS_GRP
+
+    - name: Configure RADIUS dynamic author
+      cisco.ios.ios_config:
+        lines: "{{ ['client ' + item.ip + ' server-key ' + radius_shared_key for item in radius_servers]
+                   + ['load-balance method least-outstanding batch-size 30'] }}"
+        parents: aaa server radius dynamic-author
+      no_log: true
+
+    - name: Configure RADIUS source interface and AAA for dot1x
+      cisco.ios.ios_config:
+        lines:
+          - "ip radius source-interface {{ radius_source_interface }}"
+          - authentication convert-to new-style
+          - aaa authentication dot1x default group RADIUS_GRP
+          - aaa authorization network default group RADIUS_GRP
+          - aaa authorization auth-proxy default group RADIUS_GRP
+          - aaa accounting identity default start-stop group RADIUS_GRP
+          - aaa accounting network default start-stop group RADIUS_GRP
+          - aaa accounting system default start-stop group RADIUS_GRP
+
+    - name: Configure RADIUS VSA and attribute settings
+      cisco.ios.ios_config:
+        lines:
+          - radius-server vsa send authentication
+          - radius-server vsa send accounting
+          - radius-server attribute 6 on-for-login-auth
+          - radius-server attribute 6 support-multiple
+          - radius-server attribute 8 include-in-access-req
+          - radius-server attribute 25 access-request include
+          - radius-server attribute 31 mac format ietf upper-case
+          - radius-server attribute 31 send nas-port-detail mac-only
+
+    - name: Configure dot1x global settings
+      cisco.ios.ios_config:
+        lines:
+          - dot1x system-auth-control
+          - dot1x critical eapol
+          - authentication critical recovery delay 2000
+          - no access-session mac-move deny
+          - authentication mac-move permit
+
+    - name: Configure service templates
+      cisco.ios.ios_config:
+        lines:
+          - service-template CRITICAL_DATA_ACCESS
+
+    - name: Configure the critical voice service template
+      cisco.ios.ios_config:
+        lines:
+          - voice vlan
+        parents: service-template CRITICAL_VOICE_ACCESS
+
+    - name: Configure the web auth redirect ACL
+      cisco.ios.ios_config:
+        lines: "{{ ['10 deny tcp any host ' + radius_servers[0].ip + ' eq 8443',
+                    '20 deny tcp any host ' + radius_servers[1].ip + ' eq 8443',
+                    '30 deny udp any any eq 53',
+                    '40 deny udp any any eq 67',
+                    '50 permit ip any any'] }}"
+        parents: ip access-list extended WEB_AUTH_REDIRECT

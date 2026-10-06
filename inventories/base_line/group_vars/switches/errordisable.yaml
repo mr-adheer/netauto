@@ -1,0 +1,2 @@
+# group_vars/access_switches/errdisable.yaml
+errdisable_recovery_interval: 300

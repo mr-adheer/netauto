@@ -1,0 +1,2 @@
+# group_vars/all/archive.yaml
+archive_path: "bootflash:archived-config"

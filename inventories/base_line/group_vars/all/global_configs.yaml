@@ -1,0 +1,14 @@
+# group_vars/all/global_configs.yaml
+memory_low_watermark_processor: 20000
+memory_reserved_critical: 1000
+
+timezone_name: "IST"
+timezone_hours: 5
+timezone_minutes: 30
+
+tcp_synwait_time: 10
+icmp_unreachable_rate_limit: 500
+mac_aging_time: 300
+crashinfo_max_files: 2
+
+boot_system_image: "bootflash:packages.conf"

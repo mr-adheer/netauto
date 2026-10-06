@@ -1,0 +1,6 @@
+# group_vars/all/ssh.yaml
+ssh_rsa_modulus: 4096
+ssh_rsa_key_label: "SSH-KEY-RSA-4096"
+ssh_timeout: 60
+ssh_auth_retries: 3
+ssh_source_interface: "vlan10"

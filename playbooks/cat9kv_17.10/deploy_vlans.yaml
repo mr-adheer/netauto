@@ -1,0 +1,67 @@
+---
+# =============================================================
+# Layer 2 VLANs - NETCONF
+#
+# Fully supported by the YANG model, no CLI fallback needed.
+# Structure verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# Note that <vlan-list> carries its OWN namespace
+# (Cisco-IOS-XE-vlan), different from the <native> namespace
+# around it. VLANs are an augmentation module.
+#
+# NOTE: VLAN 1 cannot be renamed - the device rejects it with
+# "Don't support configure vlan name". Do not include VLAN 1 in
+# layer2_vlans.
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+- name: Configure Layer 2 VLANs (NETCONF)
+  hosts: switches
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure VLANs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vlan>
+                {% for vlan in layer2_vlans %}
+                <vlan-list xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-vlan">
+                  <id>{{ vlan.vlan_id }}</id>
+                  <name>{{ vlan.name }}</name>
+                </vlan-list>
+                {% endfor %}
+              </vlan>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vlan/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Read back the VLANs to confirm
+      ansible.netcommon.netconf_get:
+        source: running
+        filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vlan/>
+            </native>
+          </filter>
+      register: vlan_result
+
+    - name: Show the result
+      debug:
+        var: vlan_result.output

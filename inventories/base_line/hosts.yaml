@@ -1,0 +1,92 @@
+# =============================================================
+# Inventory: Baseline
+# =============================================================
+# This file lists which devices exist, how to reach them, and
+# which groups they belong to.
+# =============================================================
+
+all:
+  vars:
+    # -----------------------------------------------------------
+    # used as variables for all devices, applicable for cisoc IOS / IOS-XE
+    # ansible_network_os: cisco.nxos.nxos is for nexus
+    # valut is present in group_vars/all/vault.yaml file, create or edit using "ansible-vaule""
+    # -----------------------------------------------------------
+    ansible_network_os: cisco.ios.ios
+    ansible_user: "{{ vault_device_username }}"
+    ansible_password: "{{ vault_device_password }}"
+
+    # Fail fast instead of hanging if a device is unreachable
+    #ansible_command_timeout: 60
+    #ansible_connect_timeout: 30
+
+  children:
+
+    # ===================================================================================================
+    # ROLE GROUPS
+    # These decide WHICH playbooks apply to a device, and HOW Ansible connects to it.
+    # A group_vars/<group name>/ folder must exist for each of these, with the exact same spelling.
+    # The "ansible_connection" can be overriden at playbook level
+    # ===================================================================================================
+
+    switches:
+      children:
+        access_switches:
+          vars:
+            ansible_connection: netconf
+            ansible_port: 830
+          hosts:
+            blr-flr1-acc-sw01:
+              ansible_host: 10.10.10.5
+            blr-flr1-acc-sw02:
+              ansible_host: 10.10.10.6
+            blr-flr2-acc-sw01:
+              ansible_host: 10.10.20.5
+
+        distribution_switches:
+          vars:
+            ansible_connection: netconf
+            ansible_port: 830
+          hosts:
+            blr-dist-sw01:
+              ansible_host: 10.10.0.20
+
+        core_switches:
+          vars:
+            ansible_connection: netconf
+            ansible_port: 830
+          hosts:
+            blr-core-sw01:
+              ansible_host: 10.10.0.10
+
+    routers:
+      vars:
+        ansible_connection: network_cli
+      hosts:
+        blr-edge-rtr01:
+          ansible_host: 10.10.10.1
+
+    # ===========================================================
+    # LOCATION GROUPS
+    # The same device can belong to a role group AND a location
+    # group at the same time. Location groups are used for values
+    # that change by site or floor (different VLANs per floor,
+    # different DNS per building, and so on).
+    #
+    # Devices are listed here by name only - their connection
+    # details are already defined in the role group above.
+    # ===========================================================
+
+    bangalore:
+      children:
+        blr_floor1:
+          hosts:
+            blr-flr1-acc-sw01:
+            blr-flr1-acc-sw02:
+        blr_floor2:
+          hosts:
+            blr-flr2-acc-sw01:
+      hosts:
+        blr-dist-sw01:
+        blr-core-sw01:
+        blr-edge-rtr01:

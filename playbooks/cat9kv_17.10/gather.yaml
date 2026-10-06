@@ -1,0 +1,73 @@
+---
+# =============================================================================
+# _gather.yaml
+#
+# Reads each device ONCE and stores the result as facts. Every deploy
+# playbook that follows uses these rather than reading again.
+#
+# Without this, nineteen playbooks would each pull several thousand lines
+# of running-config per device.
+#
+# Facts set here, available to every later play in the same run:
+#   dev_facts    parsed "show version" - model, serial, version, hostname
+#   cfg          "show running-config all" as a list of trimmed lines
+#   run_ts       one timestamp for the whole run
+#
+# Imported first by site_deploy.yaml. Individual playbooks also gather
+# for themselves if run standalone - see the "when: cfg is not defined"
+# guard in each.
+# =============================================================================
+
+- name: Gather device state
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    - name: Set one timestamp for the whole run
+      set_fact:
+        run_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%d_%H%M%S') }}"
+        run_human: "{{ lookup('pipe', 'date -u +%Y-%m-%d\\ %H:%M:%S\\ UTC') }}"
+      run_once: true
+      delegate_to: localhost
+      tags: [always]
+
+    - name: Parse show version
+      ansible.utils.cli_parse:
+        command: show version
+        parser:
+          name: ansible.netcommon.pyats
+      register: showver
+      changed_when: false
+      tags: [always]
+
+    - name: Store the device facts
+      set_fact:
+        dev_facts: "{{ showver.parsed.version }}"
+      tags: [always]
+
+    - name: Read the full running configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all
+      register: runcfg
+      changed_when: false
+      tags: [always]
+
+    - name: Store it as trimmed lines
+      set_fact:
+        cfg: "{{ runcfg.stdout_lines[0] | map('trim') | list }}"
+        validation_results: []
+      tags: [always]
+
+    - name: Device
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }})
+          {{ dev_facts.chassis }} sn:{{ dev_facts.chassis_sn }}
+          {{ dev_facts.version }}
+          - {{ cfg | length }} config lines read
+      tags: [always]

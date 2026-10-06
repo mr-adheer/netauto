@@ -1,0 +1,2 @@
+# group_vars/access_switches/dhcp_snooping.yaml
+dhcp_snooping_vlans: "10,20,30"

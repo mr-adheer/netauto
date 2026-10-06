@@ -1,0 +1,254 @@
+---
+# =============================================================================
+# validate_deployment.yaml
+#
+# Run after the deploy playbooks, at the end of a site deployment.
+# Reads the device and confirms every line actually landed.
+#
+# Why this exists: ios_config reports "changed" even when the device
+# rejected a line. The only reliable check is reading the config back.
+#
+# Checks live in group_vars/all/validation_checks.yaml.
+# Values inside them resolve from the customer's own variables, so the
+# same checks run unchanged at every site.
+#
+# SECTION-AWARE CHECKING, WITHOUT ANY PYTHON:
+#   A check may declare a "section". Rather than parsing indentation on
+#   the control node, the playbook asks the device:
+#       show running-config all | section archive
+#   and matches the line within that output only. IOS already knows its
+#   own block structure, so there is nothing to reimplement.
+#
+# Reports land in:
+#   inventories/<customer>/validation/<date>/
+#     _summary.txt              one line per device  <- read this
+#     <device>.txt              full detail per device
+#
+# Add to .gitignore if reports should not be committed:
+#   inventories/*/validation/
+#
+# Usage:
+#   ansible-playbook -i inventories/base_line/hosts.yaml \
+#       playbooks/validate_deployment.yaml --ask-vault-pass
+#
+#   Single device:   --limit blr-flr1-acc-sw01
+#   One feature:     -e "only_feature=tacacs"
+# =============================================================================
+
+- name: Validate deployment
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+    # "show running-config all" is several thousand lines and slow.
+    ansible_command_timeout: 180
+
+    # inventory_dir is built in - it resolves to the directory holding
+    # hosts.yaml, so reports follow whichever inventory is passed with -i.
+    report_root: "{{ inventory_dir }}/validation"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # One timestamp for the whole run, so every device writes into the same
+    # dated folder even if the run straddles midnight.
+    # -------------------------------------------------------------------------
+    - name: Set the run timestamp
+      set_fact:
+        run_date: "{{ lookup('pipe', 'date -u +%Y-%m-%d') }}"
+        run_time: "{{ lookup('pipe', 'date -u +%Y-%m-%d\\ %H:%M:%S\\ UTC') }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Create the report directory
+      file:
+        path: "{{ report_root }}/{{ hostvars[ansible_play_hosts[0]].run_date }}"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+
+    # -------------------------------------------------------------------------
+    # Narrow to one feature if asked, then work out which sections are needed.
+    # -------------------------------------------------------------------------
+    - name: Select the checks to run
+      set_fact:
+        active_checks: >-
+          {{ validation_checks
+             if only_feature is not defined
+             else validation_checks | selectattr('feature', 'equalto', only_feature) | list }}
+
+    - name: List the sections these checks need
+      set_fact:
+        needed_sections: >-
+          {{ active_checks | selectattr('section', 'defined')
+             | map(attribute='section') | unique | list }}
+
+    # -------------------------------------------------------------------------
+    # One read for the whole config, plus one per section. All in a single
+    # task, so it is one connection and one round of commands.
+    # -------------------------------------------------------------------------
+    - name: Read the running configuration and the required sections
+      cisco.ios.ios_command:
+        commands: >-
+          {{ ['show running-config all']
+             + (needed_sections | map('regex_replace', '^(.*)$',
+                  'show running-config all | section \\1') | list) }}
+      register: runcfg
+      changed_when: false
+
+    # stdout_lines[0] is the full config.
+    # stdout_lines[1..] are the sections, in the order of needed_sections.
+    - name: Store the full config as trimmed lines
+      set_fact:
+        cfg: "{{ runcfg.stdout_lines[0] | map('trim') | list }}"
+
+    - name: Build a lookup of section name to its lines
+      set_fact:
+        section_cfg: >-
+          {{ section_cfg | default({})
+             | combine({ item.0: item.1 | map('trim') | list }) }}
+      loop: "{{ needed_sections | zip(runcfg.stdout_lines[1:]) | list }}"
+      loop_control:
+        label: "{{ item.0 }}"
+
+    # -------------------------------------------------------------------------
+    # Evaluate every check. set_fact cannot fail, so nothing stops early -
+    # unlike assert, which ends the play on the first failure.
+    #
+    # haystack is either the whole config, or just the section's lines.
+    # -------------------------------------------------------------------------
+    - name: Evaluate the checks
+      set_fact:
+        results: "{{ results | default([]) + [ checked ] }}"
+      vars:
+        haystack: >-
+          {{ section_cfg[item.section] | default([])
+             if item.section is defined else cfg }}
+        found: "{{ item.line in haystack }}"
+        checked:
+          feature: "{{ item.feature }}"
+          state: "{{ item.state }}"
+          line: "{{ item.line }}"
+          section: "{{ item.section | default('') }}"
+          result: >-
+            {{ 'PASS'
+               if ((found | bool) if item.state == 'present'
+                   else (not (found | bool)))
+               else 'FAIL' }}
+      loop: "{{ active_checks }}"
+      loop_control:
+        label: "{{ item.line }}"
+
+    - name: Separate passes from failures
+      set_fact:
+        passed_checks: "{{ results | selectattr('result', 'equalto', 'PASS') | list }}"
+        failed_checks: "{{ results | selectattr('result', 'equalto', 'FAIL') | list }}"
+
+    # -------------------------------------------------------------------------
+    # Per-device detail report
+    # -------------------------------------------------------------------------
+    - name: Write the device report
+      copy:
+        dest: "{{ report_root }}/{{ hostvars[ansible_play_hosts[0]].run_date }}/{{ inventory_hostname }}.txt"
+        content: |
+          =========================================================================
+          {{ inventory_hostname }}
+          =========================================================================
+          Address    : {{ ansible_host }}
+          Run        : {{ hostvars[ansible_play_hosts[0]].run_time }}
+          Inventory  : {{ inventory_dir | basename }}
+          Config read: {{ cfg | length }} lines (show running-config all)
+          {% if only_feature is defined %}
+          Scope      : {{ only_feature }} only
+          {% endif %}
+
+          RESULT     : {{ 'PASS' if failed_checks | length == 0 else 'FAIL' }}
+          Checks     : {{ passed_checks | length }} of {{ results | length }} passed
+          {% if failed_checks | length > 0 %}
+
+          -------------------------------------------------------------------------
+          FAILURES
+          -------------------------------------------------------------------------
+          {% for c in failed_checks %}
+          {{ "%-14s"|format(c.feature) }}  {{ 'MISSING       ' if c.state == 'present' else 'SHOULD BE GONE' }}  {{ c.line }}{% if c.section %}   [section: {{ c.section }}]{% endif %}
+
+          {% endfor %}
+          {% endif %}
+
+          -------------------------------------------------------------------------
+          ALL CHECKS
+          -------------------------------------------------------------------------
+          {% for feat in results | map(attribute='feature') | unique %}
+          [ {{ feat }} ]
+          {% for c in results | selectattr('feature', 'equalto', feat) %}
+            {{ c.result }}  {{ 'present' if c.state == 'present' else 'absent ' }}  {{ c.line }}{% if c.section %}   [section: {{ c.section }}]{% endif %}
+
+          {% endfor %}
+
+          {% endfor %}
+          =========================================================================
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # Site summary. run_once, reading every device's results through hostvars -
+    # which is why the evaluation above used set_fact rather than a plain var.
+    # -------------------------------------------------------------------------
+    - name: Write the site summary
+      copy:
+        dest: "{{ report_root }}/{{ run_date }}/_summary.txt"
+        content: |
+          =========================================================================
+          DEPLOYMENT VALIDATION SUMMARY
+          =========================================================================
+          Inventory : {{ inventory_dir | basename }}
+          Run       : {{ run_time }}
+          Devices   : {{ ansible_play_hosts | length }}
+          {% if only_feature is defined %}
+          Scope     : {{ only_feature }} only
+          {% endif %}
+
+          -------------------------------------------------------------------------
+          {% for h in ansible_play_hosts %}
+          {% set hv = hostvars[h] %}
+          {{ "%-24s"|format(h) }}  {{ 'PASS' if hv.failed_checks | length == 0 else 'FAIL' }}   {{ "%3d"|format(hv.passed_checks | length) }}/{{ "%-3d"|format(hv.results | length) }}
+          {% for c in hv.failed_checks %}
+                                           {{ c.line }}
+          {% endfor %}
+          {% endfor %}
+          -------------------------------------------------------------------------
+
+          {% set ok = ansible_play_hosts | map('extract', hostvars) | selectattr('failed_checks', 'equalto', []) | list | length %}
+          {{ ok }} of {{ ansible_play_hosts | length }} devices passed.
+
+          Detail per device: {{ report_root }}/{{ run_date }}/<device>.txt
+          =========================================================================
+      delegate_to: localhost
+      run_once: true
+
+    # -------------------------------------------------------------------------
+    # On-screen summary
+    # -------------------------------------------------------------------------
+    - name: Result
+      debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ 'PASS' if failed_checks | length == 0 else 'FAIL' }}
+          {{ passed_checks | length }}/{{ results | length }}
+          {{ '' if failed_checks | length == 0
+             else '- ' + (failed_checks | map(attribute='line') | join(' | ')) }}
+
+    - name: Report location
+      debug:
+        msg: "Reports written to {{ report_root }}/{{ run_date }}/"
+      run_once: true
+
+    # -------------------------------------------------------------------------
+    # Fail last, so the reports are written either way.
+    # -------------------------------------------------------------------------
+    - name: Fail if any check failed
+      fail:
+        msg: >-
+          {{ failed_checks | length }} check(s) failed on {{ inventory_hostname }}.
+          See {{ report_root }}/{{ run_date }}/{{ inventory_hostname }}.txt
+      when: failed_checks | length > 0

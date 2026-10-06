@@ -1,0 +1,2 @@
+# group_vars/bangalore/snmp_location.yaml
+snmp_location: "BLR_Branch"

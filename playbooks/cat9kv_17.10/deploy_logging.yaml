@@ -1,0 +1,98 @@
+---
+# =============================================================
+# Logging - NETCONF where supported, CLI where not
+#
+# Structure verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# CLI fallback required for:
+#   - logging buffered size      (only severity-level is modelled)
+#   - logging trap informational (no element in the model)
+#   - transport udp port 514     (only the host IP is modelled)
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure logging (NETCONF)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure logging
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <logging>
+                <monitor-config>
+                  <monitor>false</monitor>
+                </monitor-config>
+                <console-config>
+                  <console>false</console>
+                </console-config>
+                <buffered>
+                  <severity-level>warnings</severity-level>
+                </buffered>
+                <history>
+                  <severity-level>informational</severity-level>
+                </history>
+                <snmp-authfail/>
+                <source-interface-conf>
+                  <interface-name-non-vrf>{{ logging_source_interface }}</interface-name-non-vrf>
+                </source-interface-conf>
+                <host>
+                  {% for server in syslog_servers %}
+                  <ipv4-host-list>
+                    <ipv4-host>{{ server.address }}</ipv4-host>
+                  </ipv4-host-list>
+                  {% endfor %}
+                </host>
+              </logging>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <logging/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure logging settings not in the YANG model (CLI)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    # Only <severity-level> is modelled under <buffered>; the
+    # buffer size has no element. Same for "logging trap".
+    - name: Configure buffer size and trap level
+      cisco.ios.ios_config:
+        lines:
+          - "logging buffered {{ logging_buffer_size }}"
+          - "logging trap {{ logging_trap_level }}"
+
+    # The model stores only the host IP - transport and port
+    # are not represented.
+    - name: Configure syslog host transport and port
+      cisco.ios.ios_config:
+        lines:
+          - "logging host {{ item.address }} transport {{ item.protocol }} port {{ item.port }}"
+      loop: "{{ syslog_servers }}"
+      loop_control:
+        label: "{{ item.address }}"

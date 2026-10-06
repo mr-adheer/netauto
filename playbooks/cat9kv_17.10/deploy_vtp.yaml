@@ -1,0 +1,60 @@
+---
+# =============================================================
+# VTP - NETCONF
+#
+# Fully supported by the YANG model, no CLI fallback needed.
+# Structure verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# NOTE: transparent mode means this switch does not participate
+# in VTP - it keeps its own VLAN database and passes VTP
+# advertisements through without acting on them. No domain name
+# or password is needed in this mode.
+#
+# The domain name is OPTIONAL - it is only configured if
+# vtp_domain_name is defined. In transparent mode the domain is
+# not used, so it can be left undefined entirely.
+#
+# UNVERIFIED: the device dump had no VTP domain configured, so
+# the <domain><domain-name> structure below is inferred rather
+# than copied from real output. Test with commit: false before
+# relying on it.
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+- name: Configure VTP (NETCONF)
+  hosts: switches
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure VTP mode
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vtp>
+                <mode xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-vtp">
+                  <{{ vtp_mode }}/>
+                </mode>
+                {% if vtp_domain_name is defined %}
+                <domain xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-vtp">
+                  <domain-name>{{ vtp_domain_name }}</domain-name>
+                </domain>
+                {% endif %}
+              </vtp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vtp/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true

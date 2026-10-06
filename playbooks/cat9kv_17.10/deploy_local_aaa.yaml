@@ -1,0 +1,262 @@
+---
+# =============================================================
+# AAA, management ACL and line configuration
+# NETCONF where the YANG model supports it, CLI where it does not.
+#
+# CLI fallback is required for:
+#   - aaa authentication fail-message  (no YANG element)
+#   - aaa login display last-success / last-failure
+#     (the YANG <display> leaf holds only ONE value)
+#
+# NOTE: run the local credentials playbook BEFORE this one.
+# This playbook sets "authentication login default local", which
+# requires the local users to already exist.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure AAA, ACL and lines (NETCONF)
+  hosts: access_switches
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+  gather_facts: false
+
+  tasks:
+
+    - name: Configure privilege exec levels
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <privilege>
+                <mode>
+                  <name>exec</name>
+                  <level>
+                    <privilege>7</privilege>
+                    <command-list><command>clear</command></command-list>
+                    <command-list><command>clear counters</command></command-list>
+                    <command-list><command>copy</command></command-list>
+                    <command-list><command>copy running-config</command></command-list>
+                    <command-list><command>ping</command></command-list>
+                    <command-list><command>ping ip</command></command-list>
+                    <command-list><command>show</command></command-list>
+                    <command-list><command>show configuration</command></command-list>
+                    <command-list><command>show ip</command></command-list>
+                    <command-list><command>show ip route</command></command-list>
+                    <command-list><command>show logging</command></command-list>
+                    <command-list><command>show processes</command></command-list>
+                    <command-list><command>show running-config</command></command-list>
+                    <command-list><command>traceroute</command></command-list>
+                    <command-list><command>verify</command></command-list>
+                  </level>
+                  <level>
+                    <privilege>15</privilege>
+                    <command-list><command>configure</command></command-list>
+                    <command-list><command>configure terminal</command></command-list>
+                  </level>
+                </mode>
+              </privilege>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <privilege/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure AAA
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa>
+                <new-model xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa"/>
+                <session-id xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">common</session-id>
+                <authentication xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <login>
+                    <name>default</name>
+                    <a1>
+                      <local/>
+                    </a1>
+                  </login>
+                  <enable>
+                    <default>
+                      <enable/>
+                    </default>
+                  </enable>
+                </authentication>
+                <authorization xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <config-commands/>
+                  <console/>
+                  <exec>
+                    <name>default</name>
+                    <a1>
+                      <local/>
+                    </a1>
+                    <a2>
+                      <if-authenticated/>
+                    </a2>
+                  </exec>
+                </authorization>
+                <accounting xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <update>
+                    <newinfo>
+                      <periodic>2880</periodic>
+                    </newinfo>
+                  </update>
+                </accounting>
+                <login xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <display>number-failures</display>
+                  <success-track-conf-time>0</success-track-conf-time>
+                </login>
+              </aaa>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure management ACL
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list>
+                  <standard xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-acl">
+                    <name>MGMT_ACL</name>
+                    {% for ace in mgmt_acl_entries %}
+                    <access-list-seq-rule>
+                      <sequence>{{ ace.sequence }}</sequence>
+                      <{{ ace.grant }}>
+                        <std-ace>
+                          {% if ace.source.any is defined %}
+                          <any/>
+                          {% else %}
+                          <ipv4-address-prefix>{{ ace.source.address }}</ipv4-address-prefix>
+                          <mask>{{ ace.source.wildcard_bits }}</mask>
+                          {% endif %}
+                          <log/>
+                        </std-ace>
+                      </{{ ace.grant }}>
+                    </access-list-seq-rule>
+                    {% endfor %}
+                  </standard>
+                </access-list>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure console and VTY lines
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <line>
+                <console>
+                  <first>0</first>
+                  <exec-timeout>
+                    <minutes>5</minutes>
+                    <seconds>0</seconds>
+                  </exec-timeout>
+                  <login>
+                    <authentication>default</authentication>
+                  </login>
+                  <logging>
+                    <synchronous/>
+                  </logging>
+                </console>
+                <vty>
+                  <first>0</first>
+                  <last>15</last>
+                  <access-class>
+                    <acccess-list>
+                      <direction>in</direction>
+                      <access-list>MGMT_ACL</access-list>
+                      <vrf-also/>
+                    </acccess-list>
+                  </access-class>
+                  <authorization>
+                    <exec>
+                      <authorization-name>default</authorization-name>
+                    </exec>
+                  </authorization>
+                  <exec-timeout>
+                    <minutes>5</minutes>
+                    <seconds>0</seconds>
+                  </exec-timeout>
+                  <login>
+                    <authentication>default</authentication>
+                  </login>
+                  <logging>
+                    <synchronous/>
+                  </logging>
+                  <transport>
+                    <output>
+                      <none/>
+                    </output>
+                    <preferred>
+                      <protocol>none</protocol>
+                    </preferred>
+                    <input>
+                      <input>ssh</input>
+                    </input>
+                  </transport>
+                </vty>
+              </line>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <line/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure AAA items unsupported by NETCONF (CLI fallback)
+  hosts: access_switches
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+  gather_facts: false
+
+  tasks:
+
+    # No YANG element exists for the AAA fail-message.
+    - name: Configure AAA fail-message
+      cisco.ios.ios_config:
+        lines:
+          - aaa authentication fail-message  * LOGIN FAILED *
+
+    # The YANG <display> leaf holds only one value, so the other
+    # two settings must be applied over CLI.
+    - name: Configure the remaining aaa login display settings
+      cisco.ios.ios_config:
+        lines:
+          - aaa login display last-success
+          - aaa login display last-failure

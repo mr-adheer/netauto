@@ -1,0 +1,186 @@
+---
+# =============================================================
+# Management hardening - HTTP, SSH and management ACLs
+#
+# Verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# Most of the SSH hardening is NOT in the YANG model. The CLI
+# has six "ip ssh server algorithm" lines and "ip http
+# access-class"; none of them appear in the XML.
+#
+# CLI fallback required for:
+#   - ip http access-class
+#   - ip ssh authentication-retries
+#   - all six "ip ssh server algorithm" lines
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure management hardening (NETCONF)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure management and HTTP ACLs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list>
+                  <standard xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-acl">
+                    <name>MGMT_ACL</name>
+                    {% for ace in mgmt_acl_entries %}
+                    <access-list-seq-rule>
+                      <sequence>{{ ace.sequence }}</sequence>
+                      <{{ ace.grant }}>
+                        <std-ace>
+                          {% if ace.source.any is defined %}
+                          <any/>
+                          {% else %}
+                          <ipv4-address-prefix>{{ ace.source.address }}</ipv4-address-prefix>
+                          <mask>{{ ace.source.wildcard_bits }}</mask>
+                          {% endif %}
+                          <log/>
+                        </std-ace>
+                      </{{ ace.grant }}>
+                    </access-list-seq-rule>
+                    {% endfor %}
+                  </standard>
+                  <standard xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-acl">
+                    <name>HTTP_ACL</name>
+                    {% for ace in http_acl_entries %}
+                    <access-list-seq-rule>
+                      <sequence>{{ ace.sequence }}</sequence>
+                      <{{ ace.grant }}>
+                        <std-ace>
+                          {% if ace.source.any is defined %}
+                          <any/>
+                          {% else %}
+                          <ipv4-address-prefix>{{ ace.source.address }}</ipv4-address-prefix>
+                          <mask>{{ ace.source.wildcard_bits }}</mask>
+                          {% endif %}
+                          <log/>
+                        </std-ace>
+                      </{{ ace.grant }}>
+                    </access-list-seq-rule>
+                    {% endfor %}
+                  </standard>
+                </access-list>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Disable HTTP and HTTPS servers
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <http xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-http">
+                  <server>false</server>
+                  <secure-server>false</secure-server>
+                  <active-session-modules>none</active-session-modules>
+                  <secure-active-session-modules>none</secure-active-session-modules>
+                </http>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <http xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-http"/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure SSH logging and timeout
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <ssh>
+                  <logging>
+                    <events/>
+                  </logging>
+                  <time-out>{{ ssh_timeout }}</time-out>
+                  <rsa>
+                    <keypair-name>{{ ssh_rsa_key_label }}</keypair-name>
+                  </rsa>
+                </ssh>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <ssh/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure hardening not in the YANG model (CLI)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    # No YANG element for ip http access-class.
+    - name: Apply the HTTP access class
+      cisco.ios.ios_config:
+        lines:
+          - ip http access-class ipv4 HTTP_ACL
+
+    # authentication-retries is not modelled.
+    - name: Configure SSH authentication retries
+      cisco.ios.ios_config:
+        lines:
+          - "ip ssh authentication-retries {{ ssh_auth_retries }}"
+
+    # None of the "ip ssh server algorithm" lines appear in the
+    # YANG model - all must be configured over CLI.
+    #
+    # NOTE: "ip ssh server algorithm authentication keyboard" is
+    # deliberately NOT included. Restricting authentication to
+    # keyboard-interactive risks locking out password-based
+    # automated logins.
+    - name: Restrict SSH server algorithms
+      cisco.ios.ios_config:
+        lines:
+          - ip ssh server algorithm kex ecdh-sha2-nistp521 ecdh-sha2-nistp384
+          - ip ssh server algorithm hostkey rsa-sha2-512 rsa-sha2-256
+          - ip ssh server algorithm encryption aes256-gcm aes256-ctr
+          - ip ssh server algorithm mac hmac-sha2-512 hmac-sha2-256
+          - ip ssh server algorithm publickey ecdsa-sha2-nistp521 ecdsa-sha2-nistp384 rsa-sha2-512

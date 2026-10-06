@@ -1,0 +1,14 @@
+# group_vars/all/tacacs.yaml
+tacacs_servers:
+  - ip: 10.11.1.1
+    timeout: 4
+  - ip: 10.11.1.2
+    timeout: 4
+
+tacacs_shared_key: "{{ vault_tacacs_key }}"
+
+tacacs_group_name: "TACACS_GRP"
+tacacs_server_prefix: "TACACS_"
+tacacs_authen_list: "TACACS_AUTHEN"
+tacacs_author_list: "TACACS_AUTHOR"
+tacacs_cmds_list: "TACACS_CMDS"

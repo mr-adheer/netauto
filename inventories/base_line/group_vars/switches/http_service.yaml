@@ -1,0 +1,25 @@
+https_cipher_suites:
+  - ecdhe-rsa-aes-gcm-sha2
+  - ecdhe-ecdsa-aes-gcm-sha2
+  - tls13-aes128-gcm-sha256
+  - tls13-aes256-gcm-sha384
+
+https_max_connections: 5
+https_idle_timeout: 180
+https_session_life: 600
+https_max_requests: 3
+
+https_acl_entries:
+  - sequence: 10
+    grant: permit
+    source:
+      address: 10.0.0.0
+      wildcard_bits: 0.255.255.255
+    log:
+      set: true
+  - sequence: 100
+    grant: deny
+    source:
+      any: true
+    log:
+      set: true

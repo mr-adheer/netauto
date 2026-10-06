@@ -1,0 +1,27 @@
+# group_vars/all/ntp.yaml
+ntp_authentication_enabled: true # or false
+
+ntp_settings_auth:
+  servers:
+    - ip: 10.10.2.1
+    - ip: 10.10.2.2
+  key: "{{ vault_ntp_key }}"
+
+ntp_settings_no_auth:
+  servers:
+    - ip: 10.10.2.1
+    - ip: 10.10.2.2
+
+ntp_acl_entries:
+  - sequence: 10
+    grant: permit
+    source:
+      host: 10.10.2.1
+  - sequence: 20
+    grant: permit
+    source:
+      host: 10.10.2.2
+  - sequence: 100
+    grant: deny
+    source:
+      any: true

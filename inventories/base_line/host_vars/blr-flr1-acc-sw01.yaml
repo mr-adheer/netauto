@@ -1,0 +1,79 @@
+# Hostname Configuation
+hostname: blr-flr1-acc-sw01
+
+# Port Configurations
+access_ports:
+  - name: GigabitEthernet1/0/3
+    vlan: 10
+    voice_vlan: 20
+    description: "AP Port"
+    template: ACCESS_NOAUTH
+  - name: GigabitEthernet1/0/4
+    vlan: 10
+    voice_vlan: 20
+    description: "Desktop Access Port"
+    template: ACCESS_DOT1X_MAB_CLOSED
+
+trunk_ports:
+  - type: GigabitEthernet
+    number: "1/0/48"
+  - type: Port-channel
+    number: "10"
+
+ntp_source_interface_type: "Vlan"
+ntp_source_interface_number: "100"
+
+#ntp_source_interface_type: "loopback"
+#ntp_source_interface_number: "0"
+
+#ntp_source_interface_type: "TenGigabitEthernet"
+#ntp_source_interface_number: "1/1/1"
+
+#ntp_source_interface_type: "Port-channel"
+#ntp_source_interface_number: "10"
+
+logging_source_interface: "Vlan100"
+
+radius_source_interface: "vlan 100"
+
+snmp_trap_source_type: "Vlan"
+snmp_trap_source_number: "100"
+
+tacacs_source_interface_type: "Vlan"
+tacacs_source_interface_number: "100"
+
+svis:
+  - vlan_id: 1
+    description: "Management SVI"
+    ip: 10.10.10.5
+    mask: 255.255.255.0
+    proxy_arp: false
+    redirects: false
+    unreachables: false
+
+  - vlan_id: 100
+    vlan_name: MGMTnew
+    description: "new Management SVI"
+    ip: 192.168.0.100
+    mask: 255.255.255.0
+    proxy_arp: false
+    redirects: false
+    unreachables: false
+
+  - vlan_id: 200
+    vlan_name: USERS
+    description: "User data SVI"
+    ip: 192.168.1.1
+    mask: 255.255.255.0
+    proxy_arp: false
+    redirects: false
+    unreachables: false
+
+  - vlan_id: 300
+    vlan_name: VOICE
+    description: "Voice SVI"
+    ip: 192.168.2.1
+    mask: 255.255.255.0
+    proxy_arp: false
+    redirects: false
+    unreachables: false

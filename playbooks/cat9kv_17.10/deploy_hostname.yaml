@@ -1,0 +1,82 @@
+---
+#configure hostname in devices that are in host_vars
+- name: Configure and validate hostname
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: Push hostname to the candidate datastore and commit
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <hostname>{{ hostname }}</hostname>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <hostname/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags:
+        - deploy
+        - never
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: Read and parse hostname from show version
+      ansible.utils.cli_parse:
+        command: show version
+        parser:
+          name: ansible.netcommon.pyats
+      register: showver
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags:
+        - validate
+        - always
+
+    - name: Record the result in memory
+      set_fact:
+        actual_hostname: "{{ showver.parsed.version.hostname }}"
+        hostname_ok: "{{ showver.parsed.version.hostname == hostname }}"
+      tags:
+        - validate
+        - always
+
+    - name: Report
+      debug:
+        msg: >-
+          {{ 'PASS' if hostname_ok | bool else 'FAIL' }}
+          ---> hostname: expected '{{ hostname }}',
+          found '{{ actual_hostname }}'
+      changed_when: not (hostname_ok | bool)
+      tags:
+        - validate
+        - always
+
+    - name: Record the result
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'hostname',
+               'check':    'hostname',
+               'expected': hostname,
+               'actual':   actual_hostname,
+               'result':   'PASS' if hostname_ok | bool else 'FAIL'
+             }] }}
+      tags:
+        - validate
+        - always

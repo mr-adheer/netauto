@@ -1,0 +1,347 @@
+---
+# =============================================================================
+# deploy_globalconfig.yaml
+#
+#   ansible-playbook deploy_globalconfig.yaml                 -> validate only
+#   ansible-playbook deploy_globalconfig.yaml --tags deploy   -> deploy, then validate
+#
+# NETCONF where the YANG model supports it, CLI where it does not.
+# The two original plays are merged into one; each task carries its own
+# connection settings.
+#
+# CLI fallback required for:
+#   no ip finger, no service config, no service pad,
+#   no service tcp-small-servers, no service udp-small-servers,
+#   no ip source-route, no service internal, no ntp allow mode control,
+#   ip options drop, mac address-table aging-time,
+#   ip icmp rate-limit unreachable, memory reserve critical
+#
+# NOT VALIDATED - accepted by the parser but never appear in
+# "show running-config all" on Catalyst 9000:
+#   no service tcp-small-servers
+#   no service udp-small-servers
+#   no ntp allow mode control
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
+
+- name: Configure and validate global settings
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: Configure service settings
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <service>
+                <password-encryption/>
+                <timestamps>
+                  <debug-config>
+                    <datetime>
+                      <msec/>
+                      <localtime/>
+                      <show-timezone/>
+                    </datetime>
+                  </debug-config>
+                  <log-config>
+                    <datetime>
+                      <msec/>
+                      <localtime/>
+                      <show-timezone/>
+                    </datetime>
+                  </log-config>
+                </timestamps>
+                <call-home/>
+                <compress-config/>
+                <counters>
+                  <max>
+                    <age>5</age>
+                  </max>
+                </counters>
+                <dhcp-config>false</dhcp-config>
+                <nagle/>
+                <sequence-numbers/>
+                <tcp-keepalives-in/>
+                <tcp-keepalives-out/>
+              </service>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <service/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: Configure memory low watermark
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <memory>
+                <free>
+                  <low-watermark>
+                    <processor>{{ memory_low_watermark_processor }}</processor>
+                  </low-watermark>
+                </free>
+              </memory>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <memory/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: Configure the clock timezone
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <clock>
+                <timezone>
+                  <zone>{{ timezone_name }}</zone>
+                  <hours>{{ timezone_hours }}</hours>
+                  <minutes>{{ timezone_minutes }}</minutes>
+                </timezone>
+              </clock>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <clock/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: Configure TCP synwait time
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <tcp>
+                  <synwait-time>{{ tcp_synwait_time }}</synwait-time>
+                </tcp>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <tcp/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: Enable software auto-upgrade
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <software>
+                <auto-upgrade>
+                  <enable/>
+                </auto-upgrade>
+              </software>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <software/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: Configure the boot system image
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <boot>
+                <system>
+                  <switch xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-switch">
+                    <all>
+                      <boot-container>
+                        <boot-filename>
+                          <filename>{{ boot_system_image }}</filename>
+                        </boot-filename>
+                      </boot-container>
+                    </all>
+                  </switch>
+                </system>
+              </boot>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <boot/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    # --- CLI fallback ---------------------------------------------------
+    - name: Disable unused services
+      cisco.ios.ios_config:
+        lines:
+          - no ip finger
+          - no service config
+          - no service pad
+          - no service tcp-small-servers
+          - no service udp-small-servers
+          - no service internal
+          - no ip source-route
+          - no ntp allow mode control
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: Configure IP hardening and limits
+      cisco.ios.ios_config:
+        lines:
+          - ip options drop
+          - "ip icmp rate-limit unreachable {{ icmp_unreachable_rate_limit }}"
+          - "mac address-table aging-time {{ mac_aging_time }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: Configure remaining memory settings
+      cisco.ios.ios_config:
+        lines:
+          - "memory reserve critical {{ memory_reserved_critical }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: Read the global configuration
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^service|^no service|^ip |^no ip |^memory |^clock timezone|^software |^boot system|^mac address-table aging
+      register: glob_read
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    - name: Store the output as trimmed lines
+      set_fact:
+        glob_lines: "{{ glob_read.stdout_lines[0] | map('trim') | list }}"
+      tags: [validate, always]
+
+    - name: Define what should be present
+      set_fact:
+        glob_checks:
+          # service block
+          - "service password-encryption"
+          - "service timestamps debug datetime msec localtime show-timezone"
+          - "service timestamps log datetime msec localtime show-timezone"
+          - "service call-home"
+          - "service compress-config"
+          - "service counters max age 5"
+          - "service nagle"
+          - "service sequence-numbers"
+          - "service tcp-keepalives-in"
+          - "service tcp-keepalives-out"
+          - "no service dhcp"
+          # CLI hardening
+          - "no ip finger"
+          - "no service config"
+          - "no service pad"
+          - "no service internal"
+          - "no ip source-route"
+          - "ip options drop"
+          # values from group_vars
+          - "memory free low-watermark processor {{ memory_low_watermark_processor }}"
+          - "memory reserve critical {{ memory_reserved_critical }}"
+          - "clock timezone {{ timezone_name }} {{ timezone_hours }} {{ timezone_minutes }}"
+          - "ip tcp synwait-time {{ tcp_synwait_time }}"
+          - "ip icmp rate-limit unreachable {{ icmp_unreachable_rate_limit }}"
+          #- "mac address-table aging-time {{ mac_aging_time }}"
+          - "software auto-upgrade enable"
+          - "boot system switch all {{ boot_system_image }}"
+      tags: [validate, always]
+
+    - name: Evaluate the checks
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'global config',
+               'check':    item,
+               'expected': 'present',
+               'actual':   'present' if item in glob_lines else 'missing',
+               'result':   'PASS' if item in glob_lines else 'FAIL'
+             }] }}
+      loop: "{{ glob_checks }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    - name: Report
+      debug:
+        msg: >-
+          {{ 'PASS' if glob_failed | length == 0 else 'FAIL' }}
+          ---> global config:
+          {{ glob_checks | length - glob_failed | length }}
+          of {{ glob_checks | length }} present
+          {{ '' if glob_failed | length == 0
+             else '- missing: ' + (glob_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        glob_failed: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'global config')
+             | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: glob_failed | length > 0
+      tags: [validate, always]

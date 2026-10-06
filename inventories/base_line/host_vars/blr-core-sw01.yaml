@@ -1,0 +1,27 @@
+hostname: Core_SW
+# managemnet vlan
+mgmt_vlan_id: 100
+mgmt_vlan_name: "MGMT"
+mgmt_vlan_ip: "192.168.0.101"
+mgmt_vlan_mask: "255.255.255.0"
+mgmt_vlan_gw: "192.168.0.1"
+mgmt_vlan_description: "--- Mgmt Vlan SVI ---"
+
+#Other SVIs
+#to be filled
+
+
+# Port Configurations
+access_ports:
+  - name: GigabitEthernet1/0/9
+    vlan: 10
+    voice_vlan: 20
+    description: "AP Port"
+    template: ACCESS_NOAUTH
+  - name: GigabitEthernet1/0/19
+    vlan: 10
+    voice_vlan: 20
+    description: "Desktop Access Port"
+    template: ACCESS_DOT1X_MAB_CLOSED
+
+ntp_source_interface: "Vlan100"

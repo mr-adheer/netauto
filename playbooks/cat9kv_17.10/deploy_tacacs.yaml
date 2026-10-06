@@ -1,0 +1,326 @@
+---
+# =============================================================
+# TACACS+ - NETCONF where supported, CLI where not
+#
+# Structure verified against a real device dump
+# (show running-config | format netconf-xml).
+#
+# CLI fallback required for:
+#   - single-connection              (no element under <tacacs><server>)
+#   - aaa authentication fail-message (no element)
+#
+# WARNING: THIS PLAYBOOK CHANGES HOW YOU LOG IN.
+# It points vty authentication, authorization and accounting at
+# TACACS. If the TACACS servers are unreachable, every command
+# will stall waiting for them to time out, and a mistake here
+# can lock you out of the device.
+#
+# Test with commit: false first, and keep a console session open.
+#
+# NOTE: get_filter is required on every NETCONF task.
+# See Cisco bug CSCwk31014.
+# =============================================================
+
+# -------------------------------------------------------------
+# PLAY 1 - NETCONF
+# -------------------------------------------------------------
+- name: Configure TACACS+ (NETCONF)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+
+  tasks:
+
+    - name: Configure TACACS servers
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <tacacs>
+                {% for s in tacacs_servers %}
+                <server xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <name>{{ tacacs_server_prefix }}{{ s.ip }}</name>
+                  <address>
+                    <ipv4>{{ s.ip }}</ipv4>
+                  </address>
+                  <timeout>{{ s.timeout }}</timeout>
+                  <key>
+                    <encryption>0</encryption>
+                    <key>{{ tacacs_shared_key }}</key>
+                  </key>
+                </server>
+                {% endfor %}
+              </tacacs>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <tacacs/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+      no_log: true
+
+    - name: Configure the TACACS source interface
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <tacacs xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <source-interface>
+                    <{{ tacacs_source_interface_type }}>{{ tacacs_source_interface_number }}</{{ tacacs_source_interface_type }}>
+                  </source-interface>
+                </tacacs>
+              </ip>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <tacacs xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa"/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure the TACACS server group
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa>
+                <new-model xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa"/>
+                <session-id xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">common</session-id>
+                <group xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <server>
+                    <tacacsplus>
+                      <name>{{ tacacs_group_name }}</name>
+                      <server>
+                        {% for s in tacacs_servers %}
+                        <name>
+                          <name>{{ tacacs_server_prefix }}{{ s.ip }}</name>
+                        </name>
+                        {% endfor %}
+                      </server>
+                    </tacacsplus>
+                  </server>
+                </group>
+              </aaa>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure AAA method lists
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa>
+                <authentication xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <login>
+                    <name>default</name>
+                    <a1>
+                      <local/>
+                    </a1>
+                  </login>
+                  <login>
+                    <name>{{ tacacs_authen_list }}</name>
+                    <a1>
+                      <group>{{ tacacs_group_name }}</group>
+                    </a1>
+                    <a2>
+                      <local/>
+                    </a2>
+                  </login>
+                  <enable>
+                    <default>
+                      <group>{{ tacacs_group_name }}</group>
+                      <enable/>
+                    </default>
+                  </enable>
+                </authentication>
+                <authorization xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <config-commands/>
+                  <console/>
+                  <exec>
+                    <name>default</name>
+                    <a1>
+                      <local/>
+                    </a1>
+                  </exec>
+                  <exec>
+                    <name>{{ tacacs_author_list }}</name>
+                    <a1>
+                      <group>{{ tacacs_group_name }}</group>
+                    </a1>
+                    <a2>
+                      <local/>
+                    </a2>
+                    <a3>
+                      <if-authenticated/>
+                    </a3>
+                  </exec>
+                  <commands>
+                    <level>7</level>
+                    <list-name>{{ tacacs_cmds_list }}</list-name>
+                    <a1>
+                      <group>{{ tacacs_group_name }}</group>
+                    </a1>
+                    <a2>
+                      <local/>
+                    </a2>
+                    <a3>
+                      <if-authenticated/>
+                    </a3>
+                  </commands>
+                  <commands>
+                    <level>15</level>
+                    <list-name>{{ tacacs_cmds_list }}</list-name>
+                    <a1>
+                      <group>{{ tacacs_group_name }}</group>
+                    </a1>
+                    <a2>
+                      <local/>
+                    </a2>
+                    <a3>
+                      <if-authenticated/>
+                    </a3>
+                  </commands>
+                </authorization>
+                <accounting xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <update>
+                    <newinfo>
+                      <periodic>2880</periodic>
+                    </newinfo>
+                  </update>
+                </accounting>
+                <login xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <display>number-failures</display>
+                  <success-track-conf-time>1</success-track-conf-time>
+                </login>
+              </aaa>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <aaa/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Configure VTY lines for TACACS
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <line>
+                <vty>
+                  <first>0</first>
+                  <last>15</last>
+                  <access-class>
+                    <acccess-list>
+                      <direction>in</direction>
+                      <access-list>MGMT_ACL</access-list>
+                      <vrf-also/>
+                    </acccess-list>
+                  </access-class>
+                  <authorization>
+                    <commands>
+                      <level>7</level>
+                      <authorization-name>{{ tacacs_cmds_list }}</authorization-name>
+                    </commands>
+                    <commands>
+                      <level>15</level>
+                      <authorization-name>{{ tacacs_cmds_list }}</authorization-name>
+                    </commands>
+                    <exec>
+                      <authorization-name>{{ tacacs_author_list }}</authorization-name>
+                    </exec>
+                  </authorization>
+                  <exec-timeout>
+                    <minutes>5</minutes>
+                    <seconds>0</seconds>
+                  </exec-timeout>
+                  <login>
+                    <authentication>{{ tacacs_authen_list }}</authentication>
+                  </login>
+                  <logging>
+                    <synchronous/>
+                  </logging>
+                  <transport>
+                    <output>
+                      <none/>
+                    </output>
+                    <preferred>
+                      <protocol>none</protocol>
+                    </preferred>
+                    <input>
+                      <input>ssh</input>
+                    </input>
+                  </transport>
+                </vty>
+              </line>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <line/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+# -------------------------------------------------------------
+# PLAY 2 - CLI fallback
+# -------------------------------------------------------------
+- name: Configure TACACS items not in the YANG model (CLI)
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: network_cli
+    ansible_port: 22
+
+  tasks:
+
+    # single-connection has no element under <tacacs><server>.
+    - name: Enable single-connection on the TACACS servers
+      cisco.ios.ios_config:
+        lines:
+          - single-connection
+        parents: "tacacs server {{ tacacs_server_prefix }}{{ item.ip }}"
+      loop: "{{ tacacs_servers }}"
+      loop_control:
+        label: "{{ item.ip }}"
+
+    # No YANG element for the AAA fail-message.
+    - name: Configure the AAA fail-message
+      cisco.ios.ios_config:
+        lines:
+          - aaa authentication fail-message  * LOGIN FAILED *
+
+    # Accounting to TACACS is configured last, deliberately - if
+    # the servers are unreachable, these settings make every
+    # command slow. Verify TACACS reachability before running.
+    - name: Configure TACACS accounting
+      cisco.ios.ios_config:
+        lines:
+          - "aaa accounting exec default start-stop group {{ tacacs_group_name }}"
+          - "aaa accounting commands 7 default start-stop group {{ tacacs_group_name }}"
+          - "aaa accounting commands 15 default start-stop group {{ tacacs_group_name }}"

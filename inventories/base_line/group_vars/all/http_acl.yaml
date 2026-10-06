@@ -1,0 +1,8 @@
+# group_vars/all/http_acl.yaml
+http_acl_entries:
+  - sequence: 100
+    grant: deny
+    source:
+      any: true
+    log:
+      set: true

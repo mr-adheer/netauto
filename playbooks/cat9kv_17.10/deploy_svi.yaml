@@ -1,0 +1,90 @@
+---
+- name: Configure SVIs via NETCONF/YANG
+  hosts: access_switches
+  vars:
+    ansible_connection: netconf
+    ansible_port: 830
+  gather_facts: false
+
+  tasks:
+    # Every SVI needs its VLAN to exist in the VLAN database first.
+    # All VLANs are created in one edit-config.
+    - name: Create the VLANs for all SVIs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vlan>
+                {% for svi in svis %}
+                <vlan-list xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-vlan">
+                  <id>{{ svi.vlan_id }}</id>
+                  <name>{{ svi.vlan_name }}</name>
+                </vlan-list>
+                {% endfor %}
+              </vlan>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <vlan/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    # All SVIs are pushed in a single edit-config, so they either all
+    # apply together or none of them do.
+    - name: Configure all SVIs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <interface>
+                {% for svi in svis %}
+                <Vlan>
+                  <name>{{ svi.vlan_id }}</name>
+                  <description>{{ svi.description }}</description>
+                  <ip>
+                    <address>
+                      <primary>
+                        <address>{{ svi.ip }}</address>
+                        <mask>{{ svi.mask }}</mask>
+                      </primary>
+                    </address>
+                    <proxy-arp>{{ svi.proxy_arp | default(false) | lower }}</proxy-arp>
+                    <redirects>{{ svi.redirects | default(false) | lower }}</redirects>
+                    <unreachables xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-icmp">{{ svi.unreachables | default(false) | lower }}</unreachables>
+                  </ip>
+                </Vlan>
+                {% endfor %}
+              </interface>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <interface>
+                <Vlan/>
+              </interface>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+
+    - name: Read back all SVIs to confirm
+      ansible.netcommon.netconf_get:
+        source: running
+        filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <interface>
+                <Vlan/>
+              </interface>
+            </native>
+          </filter>
+      register: svi_result
+
+    - name: Show the result
+      debug:
+        var: svi_result.output

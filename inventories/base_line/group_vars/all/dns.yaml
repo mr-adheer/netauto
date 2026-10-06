@@ -1,0 +1,4 @@
+# group_vars/all/dns.yaml
+dns_server_ip_1: "4.2.2.2"
+dns_server_ip_2: "8.8.8.8"
+domain_name: "clientname.com"

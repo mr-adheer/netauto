@@ -1,0 +1,124 @@
+---
+# =============================================================================
+# _report.yaml
+#
+# Runs last. Turns validation_results - accumulated by every deploy playbook
+# in this run - into report files.
+#
+# Output:
+#   inventories/<customer>/validation/<timestamp>/
+#     _summary.txt        one line per device   <- read this
+#     <device>.txt        every check, per device
+#
+# Reports are not committed. Add to .gitignore:
+#   inventories/*/validation/
+# =============================================================================
+
+- name: Write validation reports
+  hosts: all
+  gather_facts: false
+  vars:
+    report_dir: "{{ playbook_dir }}/validation/{{ run_ts }}"
+
+  tasks:
+
+    - name: Split passes from failures
+      set_fact:
+        passed: "{{ validation_results | selectattr('result', 'equalto', 'PASS') | list }}"
+        failed: "{{ validation_results | selectattr('result', 'equalto', 'FAIL') | list }}"
+      tags: [always]
+
+    - name: Create the report directory
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+      tags: [always]
+
+    # -------------------------------------------------------------------------
+    # Per-device detail
+    # -------------------------------------------------------------------------
+    - name: Write the device report
+      copy:
+        dest: "{{ report_dir }}/{{ inventory_hostname }}.txt"
+        content: |
+          =======================================================================
+          {{ inventory_hostname }}
+          =======================================================================
+          Address   : {{ ansible_host }}
+          Model     : {{ dev_facts.chassis }}
+          Serial    : {{ dev_facts.chassis_sn }}
+          Version   : {{ dev_facts.version }}
+          Image     : {{ dev_facts.system_image }}
+          Uptime    : {{ dev_facts.uptime }}
+          Reg       : {{ dev_facts.curr_config_register }}
+          Last boot : {{ dev_facts.last_reload_reason }}
+          Run       : {{ run_human }}
+
+          RESULT    : {{ 'PASS' if failed | length == 0 else 'FAIL' }}
+          Checks    : {{ passed | length }} of {{ validation_results | length }} passed
+          {% if failed | length > 0 %}
+
+          -----------------------------------------------------------------------
+          FAILURES
+          -----------------------------------------------------------------------
+          {% for c in failed %}
+          {{ "%-16s"|format(c.feature) }}  {{ c.check }}
+                            expected : {{ c.expected }}
+                            found    : {{ c.actual }}
+          {% endfor %}
+          {% endif %}
+
+          -----------------------------------------------------------------------
+          ALL CHECKS
+          -----------------------------------------------------------------------
+          {% for feat in validation_results | map(attribute='feature') | unique %}
+          [ {{ feat }} ]
+          {% for c in validation_results | selectattr('feature', 'equalto', feat) %}
+            {{ c.result }}  {{ "%-28s"|format(c.check) }}  {{ c.actual }}
+          {% endfor %}
+
+          {% endfor %}
+          =======================================================================
+      delegate_to: localhost
+      tags: [always]
+
+    # -------------------------------------------------------------------------
+    # Site summary. run_once, reading every device through hostvars.
+    # -------------------------------------------------------------------------
+    - name: Write the site summary
+      copy:
+        dest: "{{ report_dir }}/_summary.txt"
+        content: |
+          =======================================================================
+          VALIDATION SUMMARY
+          =======================================================================
+          Inventory : {{ playbook_dir | basename }}
+          Run       : {{ run_human }}
+          Devices   : {{ ansible_play_hosts | length }}
+
+          -----------------------------------------------------------------------
+          {% for h in ansible_play_hosts %}
+          {% set hv = hostvars[h] %}
+          {{ "%-24s"|format(h) }}  {{ 'PASS' if hv.failed | length == 0 else 'FAIL' }}  {{ "%3d"|format(hv.passed | length) }}/{{ "%-3d"|format(hv.validation_results | length) }}  {{ hv.dev_facts.chassis }}  {{ hv.dev_facts.version }}
+          {% for c in hv.failed %}
+                                          {{ c.feature }}/{{ c.check }}: expected '{{ c.expected }}', found '{{ c.actual }}'
+          {% endfor %}
+          {% endfor %}
+          -----------------------------------------------------------------------
+
+          {% set ok = ansible_play_hosts | map('extract', hostvars) | selectattr('failed', 'equalto', []) | list | length %}
+          {{ ok }} of {{ ansible_play_hosts | length }} devices passed.
+
+          Detail: {{ report_dir }}/<device>.txt
+          =======================================================================
+      delegate_to: localhost
+      run_once: true
+      tags: [always]
+
+    - name: Where the reports went
+      debug:
+        msg: "Reports: {{ report_dir }}/"
+      run_once: true
+      tags: [always]

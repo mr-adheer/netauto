@@ -1,0 +1,60 @@
+=======================================================================
+blr-flr1-acc-sw01
+=======================================================================
+Address   : 10.10.10.5
+Model     : C9KV-UADP-8P
+Serial    : 9M2ST6PVKOA
+Version   : 17.10.1prd7
+Image     : bootflash:packages.conf
+Uptime    : 2 hours, 8 minutes
+Reg       : 0x2102
+Last boot : Critical process run_cima_sh fault on fp_0_0 (rc=139), system report at bootflash:core/Switch-system-report_20260922-115344-UTC.tar.gz
+Run       : 2026-10-05 11:10:50 UTC
+
+RESULT    : FAIL
+Checks    : 22 of 25 passed
+
+-----------------------------------------------------------------------
+FAILURES
+-----------------------------------------------------------------------
+global config     service timestamps log datetime msec localtime show-timezone
+                  expected : present
+                  found    : missing
+global config     mac address-table aging-time 300
+                  expected : present
+                  found    : missing
+global config     boot system bootflash:packages.conf
+                  expected : present
+                  found    : missing
+
+-----------------------------------------------------------------------
+ALL CHECKS
+-----------------------------------------------------------------------
+[ global config ]
+  PASS  service password-encryption   present
+  PASS  service timestamps debug datetime msec localtime show-timezone  present
+  FAIL  service timestamps log datetime msec localtime show-timezone  missing
+  PASS  service call-home             present
+  PASS  service compress-config       present
+  PASS  service counters max age 5    present
+  PASS  service nagle                 present
+  PASS  service sequence-numbers      present
+  PASS  service tcp-keepalives-in     present
+  PASS  service tcp-keepalives-out    present
+  PASS  no service dhcp               present
+  PASS  no ip finger                  present
+  PASS  no service config             present
+  PASS  no service pad                present
+  PASS  no service internal           present
+  PASS  no ip source-route            present
+  PASS  ip options drop               present
+  PASS  memory free low-watermark processor 20000  present
+  PASS  memory reserve critical 1000  present
+  PASS  clock timezone IST 5 30       present
+  PASS  ip tcp synwait-time 10        present
+  PASS  ip icmp rate-limit unreachable 500  present
+  FAIL  mac address-table aging-time 300  missing
+  PASS  software auto-upgrade enable  present
+  FAIL  boot system bootflash:packages.conf  missing
+
+=======================================================================
