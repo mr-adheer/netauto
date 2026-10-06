@@ -1,37 +1,80 @@
 ---
-# =============================================================
-# Management hardening - HTTP, SSH and management ACLs
+# =============================================================================
+# deploy_management_hardening.yaml
 #
-# Verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook deploy_management_hardening.yaml                 -> validate only
+#   ansible-playbook deploy_management_hardening.yaml --tags deploy   -> deploy, then validate
 #
-# Most of the SSH hardening is NOT in the YANG model. The CLI
-# has six "ip ssh server algorithm" lines and "ip http
-# access-class"; none of them appear in the XML.
+# Management hardening: management and HTTP ACLs, HTTP server, SSH.
+# NETCONF where the YANG model supports it, CLI where it does not.
+# The two original plays are merged into one; each task carries its own
+# connection settings.
 #
-# CLI fallback required for:
+# CLI is required for:
 #   - ip http access-class
 #   - ip ssh authentication-retries
-#   - all six "ip ssh server algorithm" lines
+#   - every "ip ssh server algorithm" line
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# The SSH algorithm lines come from the ssh_server_algorithms variable, which
+# both the deploy and the validation use - one list, no copy to drift.
+# "ip ssh server algorithm authentication keyboard" is deliberately NOT
+# included: restricting authentication to keyboard-interactive risks locking
+# out password-based automated logins.
+#
+# -----------------------------------------------------------------------------
+# CAUTION - THIS PLAYBOOK CAN LOCK YOU OUT
+#
+#   Restricting SSH algorithms affects every NEW SSH and NETCONF connection,
+#   including Ansible's own. The current run keeps working because its
+#   connection is already open. The NEXT run negotiates fresh, and fails if
+#   your SSH client cannot use any of the permitted algorithms.
+#
+#   After the first deploy to a device, run this playbook again in validate
+#   mode. If that second run connects, the algorithms are compatible. Keep a
+#   console session open until it does.
+# -----------------------------------------------------------------------------
+#
+# WHY THE FIRST CLI TASK RETRIES
+#   IOS-XE applies a NETCONF commit in the background. While that sync runs,
+#   CLI configuration is refused, so the first CLI task after the NETCONF
+#   commits retries for up to 30 seconds.
+#
+# VALIDATION
+#   HTTP and SSH settings are read from "show running-config all" and checked
+#   exactly. Each ACL is read as its own section and every entry is checked,
+#   built from the same mgmt_acl_entries / http_acl_entries variables the
+#   deploy uses. Repeated spaces are collapsed before comparing, because IOS
+#   pads ACL lines for alignment (for example "deny   any").
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-# -------------------------------------------------------------
-# PLAY 1 - NETCONF
-# -------------------------------------------------------------
-- name: Configure management hardening (NETCONF)
+- name: Configure and validate management hardening
   hosts: all
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure management and HTTP ACLs
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the management and HTTP ACLs
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
       ansible.netcommon.netconf_config:
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -79,19 +122,24 @@
               </ip>
             </native>
           </config>
+      tags: [deploy, never]
+
+    - name: DEPLOY - Disable the HTTP and HTTPS servers
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      ansible.netcommon.netconf_config:
         get_filter: |
           <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
               <ip>
-                <access-list/>
+                <http xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-http"/>
               </ip>
             </native>
           </filter>
         target: candidate
         commit: true
-
-    - name: Disable HTTP and HTTPS servers
-      ansible.netcommon.netconf_config:
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -105,19 +153,24 @@
               </ip>
             </native>
           </config>
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure SSH logging, timeout and RSA key
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      ansible.netcommon.netconf_config:
         get_filter: |
           <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
               <ip>
-                <http xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-http"/>
+                <ssh/>
               </ip>
             </native>
           </filter>
         target: candidate
         commit: true
-
-    - name: Configure SSH logging and timeout
-      ansible.netcommon.netconf_config:
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -134,53 +187,128 @@
               </ip>
             </native>
           </config>
-        get_filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <ip>
-                <ssh/>
-              </ip>
-            </native>
-          </filter>
-        target: candidate
-        commit: true
+      tags: [deploy, never]
 
-# -------------------------------------------------------------
-# PLAY 2 - CLI fallback
-# -------------------------------------------------------------
-- name: Configure hardening not in the YANG model (CLI)
-  hosts: all
-  gather_facts: false
-  vars:
-    ansible_connection: network_cli
-    ansible_port: 22
-
-  tasks:
-
-    # No YANG element for ip http access-class.
-    - name: Apply the HTTP access class
+    # --- CLI: settings the YANG model cannot hold ---------------------------
+    - name: DEPLOY - Apply the HTTP access class and SSH retries
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
       cisco.ios.ios_config:
         lines:
           - ip http access-class ipv4 HTTP_ACL
-
-    # authentication-retries is not modelled.
-    - name: Configure SSH authentication retries
-      cisco.ios.ios_config:
-        lines:
           - "ip ssh authentication-retries {{ ssh_auth_retries }}"
+      register: hard_cli
+      until: hard_cli is not failed
+      retries: 3
+      delay: 10
+      tags: [deploy, never]
 
-    # None of the "ip ssh server algorithm" lines appear in the
-    # YANG model - all must be configured over CLI.
-    #
-    # NOTE: "ip ssh server algorithm authentication keyboard" is
-    # deliberately NOT included. Restricting authentication to
-    # keyboard-interactive risks locking out password-based
-    # automated logins.
-    - name: Restrict SSH server algorithms
+    - name: DEPLOY - Restrict the SSH server algorithms
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
       cisco.ios.ios_config:
-        lines:
-          - ip ssh server algorithm kex ecdh-sha2-nistp521 ecdh-sha2-nistp384
-          - ip ssh server algorithm hostkey rsa-sha2-512 rsa-sha2-256
-          - ip ssh server algorithm encryption aes256-gcm aes256-ctr
-          - ip ssh server algorithm mac hmac-sha2-512 hmac-sha2-256
-          - ip ssh server algorithm publickey ecdsa-sha2-nistp521 ecdsa-sha2-nistp384 rsa-sha2-512
+        lines: "{{ ssh_server_algorithms }}"
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: VALIDATE - Read the HTTP, SSH and ACL configuration back
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^ip http|^no ip http|^ip ssh
+          - show running-config all | section ^ip access-list standard MGMT_ACL$
+          - show running-config all | section ^ip access-list standard HTTP_ACL$
+      register: hard_read
+      changed_when: false
+      tags: [validate, always]
+
+    # Spaces are collapsed as well as trimmed: IOS pads ACL lines for
+    # alignment, for example "deny   any".
+    - name: VALIDATE - Store the output as normalised lines
+      set_fact:
+        svc_lines: "{{ hard_read.stdout_lines[0] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+        acl_lines:
+          MGMT_ACL: "{{ hard_read.stdout_lines[1] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+          HTTP_ACL: "{{ hard_read.stdout_lines[2] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Define the expected HTTP and SSH lines
+      set_fact:
+        svc_checks: >-
+          {{ [
+               'no ip http server',
+               'no ip http secure-server',
+               'ip http access-class ipv4 HTTP_ACL',
+               'ip http active-session-modules none',
+               'ip http secure-active-session-modules none',
+               'ip ssh logging events',
+               'ip ssh time-out ' ~ ssh_timeout,
+               'ip ssh authentication-retries ' ~ ssh_auth_retries,
+               'ip ssh rsa keypair-name ' ~ ssh_rsa_key_label
+             ] + ssh_server_algorithms }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the HTTP and SSH settings and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'management hardening',
+               'check':    item,
+               'expected': 'present',
+               'actual':   'present' if item in svc_lines else 'missing',
+               'result':   'PASS' if item in svc_lines else 'FAIL'
+             }] }}
+      loop: "{{ svc_checks }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    # One check per ACL entry, built from the same variables the deploy uses.
+    # A wildcard of 0.0.0.0 is printed by IOS as the bare address.
+    - name: VALIDATE - Check every ACL entry and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'management hardening',
+               'check':    item.0.name ~ ' / ' ~ ace_line,
+               'expected': 'present',
+               'actual':   'present' if ace_line in acl_lines[item.0.name] else 'missing',
+               'result':   'PASS' if ace_line in acl_lines[item.0.name] else 'FAIL'
+             }] }}
+      vars:
+        ace_source: >-
+          {{ 'any' if item.1.source.any is defined
+             else item.1.source.address if item.1.source.wildcard_bits == '0.0.0.0'
+             else item.1.source.address ~ ' ' ~ item.1.source.wildcard_bits }}
+        ace_line: "{{ item.1.sequence }} {{ item.1.grant }} {{ ace_source }} log"
+      loop: >-
+        {{ [ {'name': 'MGMT_ACL', 'entries': mgmt_acl_entries},
+             {'name': 'HTTP_ACL', 'entries': http_acl_entries} ]
+           | subelements('entries') }}
+      loop_control:
+        label: "{{ item.0.name }} / {{ item.1.sequence }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if hard_failed | length == 0 else 'FAIL' }}
+          ---> management hardening:
+          {{ hard_all | length - hard_failed | length }}
+          of {{ hard_all | length }} present
+          {{ '' if hard_failed | length == 0
+             else '- missing: ' + (hard_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        hard_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'management hardening') | list }}
+        hard_failed: >-
+          {{ hard_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: hard_failed | length > 0
+      tags: [validate, always]
