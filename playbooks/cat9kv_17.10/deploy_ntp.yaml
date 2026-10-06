@@ -1,37 +1,72 @@
 ---
-# =============================================================
-# NTP - NETCONF
+# =============================================================================
+# deploy_ntp.yaml
 #
-# Authenticated or unauthenticated, decided by:
+#   ansible-playbook deploy_ntp.yaml                 -> validate only
+#   ansible-playbook deploy_ntp.yaml --tags deploy   -> deploy, then validate
+#
+# NTP, authenticated or unauthenticated, decided by:
 #   ntp_authentication_enabled: true | false
-# in group_vars.
+# in group_vars. Authenticated is the standard - set false only for clients
+# who cannot supply an NTP key.
 #
-# Set it to false only for clients who cannot supply an NTP
-# authentication key. Authenticated is the standard.
-#
-# The interface source is supplied as two variables:
+# The source interface is two variables:
 #   ntp_source_interface_type:   "Vlan"
 #   ntp_source_interface_number: "100"
-# producing <source><Vlan>100</Vlan></source>
+# producing <source><Vlan>100</Vlan></source>, printed as "ntp source Vlan100".
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# Fully supported by the YANG model - no CLI fallback.
+#
+# NOTE: switching an existing device from authenticated to unauthenticated
+# does not remove the old authentication settings. Fresh deployments are
+# unaffected.
+#
+# -----------------------------------------------------------------------------
+# VALIDATION
+#   Reads the NTP lines and the NTP_ACL section from "show running-config all".
+#   Checks depend on ntp_authentication_enabled, so an unauthenticated client
+#   is not failed for missing key settings.
+#
+#   The NTP key itself is not validated - IOS stores it encrypted. Only the
+#   presence of key 1 is checked.
+#
+#   mode: exact    the whole line must match
+#   mode: prefix   the line must start with this text, followed by a space or
+#                  the end of the line - so 10.10.2.1 cannot match 10.10.2.11
+#
+#   Straight after a deploy the read retries until the NETCONF commit has
+#   synced. On a validate-only run it reads once.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-- name: Configure NTP (NETCONF)
+- name: Configure and validate NTP
   hosts: all
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    # ---------------------------------------------------------
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
     # The peer ACL is the same either way.
-    # ---------------------------------------------------------
-    - name: Configure the NTP peer ACL
+    - name: DEPLOY - Configure the NTP peer ACL
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
       ansible.netcommon.netconf_config:
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <ip>
+                <access-list/>
+              </ip>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -58,22 +93,23 @@
               </ip>
             </native>
           </config>
+      register: ntp_deploy
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure NTP with authentication
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      ansible.netcommon.netconf_config:
         get_filter: |
           <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <ip>
-                <access-list/>
-              </ip>
+              <ntp/>
             </native>
           </filter>
         target: candidate
         commit: true
-
-    # ---------------------------------------------------------
-    # WITH authentication
-    # ---------------------------------------------------------
-    - name: Configure NTP with authentication
-      ansible.netcommon.netconf_config:
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -106,6 +142,15 @@
               </ntp>
             </native>
           </config>
+      when: ntp_authentication_enabled | bool
+      no_log: true
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure NTP without authentication
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      ansible.netcommon.netconf_config:
         get_filter: |
           <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -114,14 +159,7 @@
           </filter>
         target: candidate
         commit: true
-      when: ntp_authentication_enabled
-      no_log: true
-
-    # ---------------------------------------------------------
-    # WITHOUT authentication
-    # ---------------------------------------------------------
-    - name: Configure NTP without authentication
-      ansible.netcommon.netconf_config:
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -144,12 +182,132 @@
               </ntp>
             </native>
           </config>
-        get_filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <ntp/>
-            </native>
-          </filter>
-        target: candidate
-        commit: true
-      when: not ntp_authentication_enabled
+      when: not (ntp_authentication_enabled | bool)
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # After a deploy, retry until the NTP config has synced - the access-group
+    # line is set in both modes, so it marks the NTP commit as applied.
+    # On a validate-only run ntp_deploy is undefined and it reads once.
+    - name: VALIDATE - Read the NTP configuration back
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^ntp
+          - show running-config all | section ^ip access-list standard NTP_ACL$
+      register: ntp_read
+      until: >-
+        ntp_deploy is not defined
+        or 'ntp access-group peer NTP_ACL' in ntp_read.stdout[0]
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      changed_when: false
+      tags: [validate, always]
+
+    # Spaces are collapsed as well as trimmed, because IOS pads ACL lines.
+    - name: VALIDATE - Store the output as normalised lines
+      set_fact:
+        ntp_lines: "{{ ntp_read.stdout_lines[0] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+        ntp_acl_lines: "{{ ntp_read.stdout_lines[1] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Define the expected NTP lines
+      set_fact:
+        ntp_checks: >-
+          {{ [
+               {'mode': 'exact', 'line': 'ntp source ' ~ ntp_source_interface_type ~ ntp_source_interface_number},
+               {'mode': 'exact', 'line': 'ntp access-group peer NTP_ACL'}
+             ]
+             + ([
+                  {'mode': 'exact',  'line': 'ntp authenticate'},
+                  {'mode': 'prefix', 'line': 'ntp authentication-key 1 md5'},
+                  {'mode': 'exact',  'line': 'ntp trusted-key 1'}
+                ] if ntp_authentication_enabled | bool else []) }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the NTP settings and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'ntp',
+               'check':    item.line,
+               'expected': 'present',
+               'actual':   'present' if hit else 'missing',
+               'result':   'PASS' if hit else 'FAIL'
+             }] }}
+      vars:
+        hit: >-
+          {{ (item.line in ntp_lines) if item.mode == 'exact'
+             else ((ntp_lines | select('match', '^' ~ (item.line | regex_escape) ~ '(\\s|$)')
+                    | list | length) > 0) }}
+      loop: "{{ ntp_checks }}"
+      loop_control:
+        label: "{{ item.line }}"
+      tags: [validate, always]
+
+    # One check per server, from the same variables the deploy uses.
+    # Prefix match, so trailing options the device adds do not fail it.
+    - name: VALIDATE - Check each NTP server and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'ntp',
+               'check':    server_line,
+               'expected': 'present',
+               'actual':   'present' if hit else 'missing',
+               'result':   'PASS' if hit else 'FAIL'
+             }] }}
+      vars:
+        server_line: >-
+          {{ 'ntp server ' ~ item.ip ~ (' key 1' if ntp_authentication_enabled | bool else '') }}
+        hit: >-
+          {{ (ntp_lines | select('match', '^' ~ (server_line | regex_escape) ~ '(\\s|$)')
+              | list | length) > 0 }}
+      loop: >-
+        {{ ntp_settings_auth.servers if ntp_authentication_enabled | bool
+           else ntp_settings_no_auth.servers }}
+      loop_control:
+        label: "{{ item.ip }}"
+      tags: [validate, always]
+
+    # One check per ACL entry. IOS prints a single host as the bare address.
+    - name: VALIDATE - Check every NTP ACL entry and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'ntp',
+               'check':    'NTP_ACL / ' ~ ace_line,
+               'expected': 'present',
+               'actual':   'present' if ace_line in ntp_acl_lines else 'missing',
+               'result':   'PASS' if ace_line in ntp_acl_lines else 'FAIL'
+             }] }}
+      vars:
+        ace_line: >-
+          {{ item.sequence ~ ' ' ~ item.grant ~ ' '
+             ~ ('any' if item.source.any is defined else item.source.host) }}
+      loop: "{{ ntp_acl_entries }}"
+      loop_control:
+        label: "{{ item.sequence }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if ntp_failed | length == 0 else 'FAIL' }}
+          ---> ntp ({{ 'authenticated' if ntp_authentication_enabled | bool else 'unauthenticated' }}):
+          {{ ntp_all | length - ntp_failed | length }}
+          of {{ ntp_all | length }} present
+          {{ '' if ntp_failed | length == 0
+             else '- missing: ' + (ntp_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        ntp_all: >-
+          {{ validation_results | selectattr('feature', 'equalto', 'ntp') | list }}
+        ntp_failed: >-
+          {{ ntp_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: ntp_failed | length > 0
+      tags: [validate, always]
