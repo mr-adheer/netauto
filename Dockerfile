@@ -11,6 +11,15 @@
 # sudo docker rmi -f netauto:latest
 # sudo docker system prune
 
+# misc
+# 1  ansible-galaxy collection list --format yaml > collections_installed.yaml
+# 2  cat collections_installed.yaml
+# 3  cat requirements.txt
+# 4  grep -A1 -E "cisco.ios:|ansible.netcommon:|ansible.utils:" collections_installed.yaml
+# 5  touch requirements.yml
+# 6  vim requirements.yml
+# 7  grep -iE "^(ansible|ansible-core|ansible-pylibssh|ncclient|paramiko|pyats|genie|jinja2|netaddr|xmltodict|lxml)==" requirements.txt
+
 FROM ubuntu:24.04
 
 # Avoid interactive prompts during build
@@ -32,26 +41,16 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-# Automation stack - unpinned for now, so pip always resolves valid current versions.
-# Once this builds successfully, run `pip3 show ansible netmiko napalm pyats genie`
-# inside the container and pin these to the exact versions that worked, for
-# long-term reproducibility.
-RUN pip3 install --break-system-packages \
-    ansible \
-    netmiko \
-    napalm \
-    pyats[full] \
-    genie \
-    ansible-pylibssh
+# Python packages, pinned to the versions tested on Cat9kv IOS-XE 17.10 (October 2026).
+# To upgrade: change versions in requirements.txt, rebuild, and re-test in the lab.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --break-system-packages -r /tmp/requirements.txt
 
-# Cisco Ansible collections
-RUN ansible-galaxy collection install \
-    cisco.ios \
-    cisco.nxos \
-    cisco.iosxr
+# Ansible collections, pinned (cisco.ios, ansible.netcommon, ansible.utils)
+COPY requirements.yml /tmp/requirements.yml
+RUN ansible-galaxy collection install -r /tmp/requirements.yml
 
-# Working directory where the templates/playbooks repo will be mounted
-WORKDIR /netauto-repo
+# Working directory where the repo is mounted (must match the docker run -v target)
+WORKDIR /netauto
 
 CMD ["/bin/bash"]
-

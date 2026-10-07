@@ -1,33 +1,60 @@
 ---
-# =============================================================
-# Logging - NETCONF where supported, CLI where not
+# =============================================================================
+# deploy_logging.yaml
 #
-# Structure verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook deploy_logging.yaml                 -> validate only
+#   ansible-playbook deploy_logging.yaml --tags deploy   -> deploy, then validate
 #
-# CLI fallback required for:
-#   - logging buffered size      (only severity-level is modelled)
-#   - logging trap informational (no element in the model)
-#   - transport udp port 514     (only the host IP is modelled)
+# Logging. NETCONF where the YANG model supports it, CLI where it does not.
+# The two original plays are merged into one; each task carries its own
+# connection settings.
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# CLI is required for:
+#   - the logging buffer size      (only the severity level is modelled)
+#   - logging trap level           (no element in the model)
+#   - syslog host transport/port   (only the host address is modelled)
+#
+# The buffer size and severity are set together on one CLI line. Setting the
+# size alone can reset the buffered severity to its default, overriding the
+# level the NETCONF task just applied.
+#
+# WHY THE FIRST CLI TASK RETRIES
+#   IOS-XE applies a NETCONF commit to the running configuration in the
+#   background. While that sync runs, CLI configuration is refused. The first
+#   CLI task after the NETCONF commit therefore retries for up to 30 seconds.
+#
+# VALIDATION
+#   Reads every logging line from "show running-config all" and checks each
+#   expected line exactly. Syslog hosts are checked one per server, built from
+#   the same syslog_servers variable the deployment uses.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-# -------------------------------------------------------------
-# PLAY 1 - NETCONF
-# -------------------------------------------------------------
-- name: Configure logging (NETCONF)
+- name: Configure and validate logging
   hosts: all
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure logging
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure logging destinations, levels and source
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
       ansible.netcommon.netconf_config:
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <logging/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -58,41 +85,114 @@
               </logging>
             </native>
           </config>
-        get_filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <logging/>
-            </native>
-          </filter>
-        target: candidate
-        commit: true
+      tags: [deploy, never]
 
-# -------------------------------------------------------------
-# PLAY 2 - CLI fallback
-# -------------------------------------------------------------
-- name: Configure logging settings not in the YANG model (CLI)
-  hosts: all
-  gather_facts: false
-  vars:
-    ansible_connection: network_cli
-    ansible_port: 22
-
-  tasks:
-
-    # Only <severity-level> is modelled under <buffered>; the
-    # buffer size has no element. Same for "logging trap".
-    - name: Configure buffer size and trap level
+    # --- CLI: settings the YANG model cannot hold ---------------------------
+    # Size and severity together, so the size cannot reset the severity.
+    - name: DEPLOY - Configure the logging buffer size and trap level
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
       cisco.ios.ios_config:
         lines:
-          - "logging buffered {{ logging_buffer_size }}"
+          - "logging buffered {{ logging_buffer_size }} warnings"
           - "logging trap {{ logging_trap_level }}"
+      register: log_cli
+      until: log_cli is not failed
+      retries: 3
+      delay: 10
+      tags: [deploy, never]
 
-    # The model stores only the host IP - transport and port
-    # are not represented.
-    - name: Configure syslog host transport and port
+    - name: DEPLOY - Configure syslog host transport and port
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
       cisco.ios.ios_config:
         lines:
           - "logging host {{ item.address }} transport {{ item.protocol }} port {{ item.port }}"
       loop: "{{ syslog_servers }}"
       loop_control:
         label: "{{ item.address }}"
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: VALIDATE - Read the logging configuration back
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^logging |^no logging
+      register: log_read
+      changed_when: false
+      tags: [validate, always]
+
+    - name: VALIDATE - Store the output as trimmed lines
+      set_fact:
+        log_lines: "{{ log_read.stdout_lines[0] | map('trim') | list }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Define the expected logging lines
+      set_fact:
+        log_checks:
+          - "no logging console"
+          - "no logging monitor"
+          - "logging buffered {{ logging_buffer_size }} warnings"
+          - "logging history informational"
+          - "logging trap {{ logging_trap_level }}"
+          - "logging snmp-authfail"
+          - "logging source-interface {{ logging_source_interface }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the logging settings and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'logging',
+               'check':    item,
+               'expected': 'present',
+               'actual':   'present' if item in log_lines else 'missing',
+               'result':   'PASS' if item in log_lines else 'FAIL'
+             }] }}
+      loop: "{{ log_checks }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    # One check per syslog server, from the same variable the deploy uses.
+    - name: VALIDATE - Check each syslog host and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'logging',
+               'check':    host_line,
+               'expected': 'present',
+               'actual':   'present' if host_line in log_lines else 'missing',
+               'result':   'PASS' if host_line in log_lines else 'FAIL'
+             }] }}
+      vars:
+        host_line: "logging host {{ item.address }} transport {{ item.protocol }} port {{ item.port }}"
+      loop: "{{ syslog_servers }}"
+      loop_control:
+        label: "{{ item.address }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if log_failed | length == 0 else 'FAIL' }}
+          ---> logging:
+          {{ log_all | length - log_failed | length }}
+          of {{ log_all | length }} present
+          {{ '' if log_failed | length == 0
+             else '- missing: ' + (log_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        log_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'logging') | list }}
+        log_failed: >-
+          {{ log_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: log_failed | length > 0
+      tags: [validate, always]
