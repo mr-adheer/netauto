@@ -51,6 +51,6 @@ COPY requirements.yml /tmp/requirements.yml
 RUN ansible-galaxy collection install -r /tmp/requirements.yml
 
 # Working directory where the repo is mounted (must match the docker run -v target)
-WORKDIR /netauto
+WORKDIR /netauto-repo
 
 CMD ["/bin/bash"]
