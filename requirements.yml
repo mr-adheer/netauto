@@ -1,0 +1,13 @@
+# requirements.yml
+# Ansible collections used by the playbooks, pinned to the versions tested
+# with Cat9kv IOS-XE 17.10 (October 2026).
+# Install with: ansible-galaxy collection install -r requirements.yml
+---
+collections:
+  - name: cisco.ios
+    version: "11.5.1"
+  - name: ansible.netcommon
+    version: "8.6.2"
+  - name: ansible.utils
+    version: "6.1.0"
+
