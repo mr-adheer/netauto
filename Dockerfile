@@ -11,7 +11,7 @@
 # sudo docker rmi -f netauto:latest
 # sudo docker system prune
 
-# misc
+# misc commands
 # 1  ansible-galaxy collection list --format yaml > collections_installed.yaml
 # 2  cat collections_installed.yaml
 # 3  cat requirements.txt
