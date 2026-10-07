@@ -1,39 +1,51 @@
 ---
-# =============================================================
-# VTP - NETCONF
+# =============================================================================
+# deploy_vtp.yaml
 #
-# Fully supported by the YANG model, no CLI fallback needed.
-# Structure verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
-# NOTE: transparent mode means this switch does not participate
-# in VTP - it keeps its own VLAN database and passes VTP
-# advertisements through without acting on them. No domain name
-# or password is needed in this mode.
+# Variables (group_vars):
+#   vtp_mode          transparent | server | client | off
+#   vtp_domain_name   optional - only configured and checked if defined
 #
-# The domain name is OPTIONAL - it is only configured if
-# vtp_domain_name is defined. In transparent mode the domain is
-# not used, so it can be left undefined entirely.
+# Fully supported by the YANG model, no CLI fallback needed. Structure
+# verified against a real device dump (show running-config | format
+# netconf-xml).
 #
-# UNVERIFIED: the device dump had no VTP domain configured, so
-# the <domain><domain-name> structure below is inferred rather
-# than copied from real output. Test with commit: false before
-# relying on it.
+# NOTE: transparent mode means this switch does not participate in VTP - it
+# keeps its own VLAN database and passes VTP advertisements through without
+# acting on them. No domain name or password is needed in this mode.
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# UNVERIFIED: the device dump had no VTP domain configured, so the
+# <domain><domain-name> structure below is inferred rather than copied from
+# real output. The validation will show whether it landed.
+#
+# NETCONF uses error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# VALIDATION
+#   Reads "show vtp status", which shows the operating mode and domain
+#   whatever the mode (the running config hides default settings). Mode is
+#   compared case-insensitively ("transparent" vs "Transparent"). After a
+#   deploy in the same run, the read retries (3 x 10 seconds), because
+#   IOS-XE applies a NETCONF commit in the background.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-- name: Configure VTP (NETCONF)
+- name: Configure and validate VTP
   hosts: switches
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure VTP mode
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the VTP mode and domain
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -58,3 +70,90 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: vtp_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # Retries only when a deploy ran in this run (vtp_deploy is defined),
+    # until the expected mode shows up.
+    - name: VALIDATE - Read the VTP status back, retries after deploy
+      cisco.ios.ios_command:
+        commands:
+          - show vtp status
+      register: vtp_read
+      until: >-
+        vtp_deploy is not defined
+        or (vtp_read is not failed
+            and (vtp_read.stdout[0] | default(''))
+                is search('VTP Operating Mode\s*:\s*' ~ vtp_mode ~ '\s*$',
+                          ignorecase=True, multiline=True))
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    # Picks the values after the colon, e.g.
+    #   VTP Operating Mode                : Transparent
+    #   VTP Domain Name                   : CAMPUS
+    - name: VALIDATE - Extract the VTP mode and domain
+      set_fact:
+        actual_vtp_mode: >-
+          {{ (vtp_read.stdout[0] | default('')
+              | regex_search('VTP Operating Mode\s*:\s*(\S*)', '\1', multiline=True)
+              | default(['not read'], true))[0] }}
+        actual_vtp_domain: >-
+          {{ (vtp_read.stdout[0] | default('')
+              | regex_search('VTP Domain Name\s*:[ \t]*(\S*)', '\1', multiline=True)
+              | default([''], true))[0] }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the VTP mode and domain and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'vtp',
+               'check':    item.check,
+               'expected': item.expected,
+               'actual':   item.actual,
+               'result':   'PASS' if item.ok else 'FAIL'
+             }] }}
+      loop: >-
+        {{ [ {'check': 'vtp mode',
+              'expected': vtp_mode,
+              'actual': actual_vtp_mode,
+              'ok': (actual_vtp_mode | lower) == (vtp_mode | lower)} ]
+           + ([ {'check': 'vtp domain',
+                 'expected': vtp_domain_name | default(''),
+                 'actual': actual_vtp_domain if actual_vtp_domain else 'none',
+                 'ok': actual_vtp_domain == (vtp_domain_name | default(''))} ]
+              if vtp_domain_name is defined else []) }}
+      loop_control:
+        label: "{{ item.check }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if vtp_failed | length == 0 else 'FAIL' }}
+          ---> vtp:
+          {{ vtp_all | map(attribute='check') | zip(vtp_all | map(attribute='actual')) | map('join', ' = ') | join(', ') }}
+          {{ '' if vtp_failed | length == 0
+             else '- expected: ' + (vtp_failed | map(attribute='expected') | join(', ')) }}
+      vars:
+        vtp_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'vtp') | list }}
+        vtp_failed: >-
+          {{ vtp_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: vtp_failed | length > 0
+      tags: [validate, always]

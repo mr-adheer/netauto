@@ -1,15 +1,46 @@
 ---
-- name: Configure SVIs via NETCONF/YANG
+# =============================================================================
+# deploy_svi.yaml
+#
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# Creates the VLAN for each SVI, then the SVIs themselves, from the "svis"
+# list in host_vars/<switch>.yaml:
+#
+#   svis:
+#     - { vlan_id: 100, vlan_name: MGMT, description: "== SVI - MGMT ==",
+#         ip: 10.10.10.5, mask: 255.255.255.0 }
+#     # optional per SVI, default false: proxy_arp, redirects, unreachables
+#
+# Fully supported by the YANG model, so no CLI fallback is needed. Each step
+# is one edit-config, so all SVIs apply together or none do
+# (error_option: rollback-on-error).
+#
+# VALIDATION
+#   "show vlan brief" for the VLAN id and name, and each SVI read as its own
+#   section ("interface VlanX$"), so a line under one SVI cannot satisfy a
+#   check for another. Checks per SVI: VLAN exists with the right name,
+#   description, ip address, and the redirects / unreachables / proxy-arp
+#   settings. After a deploy in the same run, the read retries (3 x 10
+#   seconds), because IOS-XE applies a NETCONF commit in the background.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
+
+- name: Configure and validate SVIs
   hosts: access_switches
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
   gather_facts: false
 
   tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
     # Every SVI needs its VLAN to exist in the VLAN database first.
-    # All VLANs are created in one edit-config.
-    - name: Create the VLANs for all SVIs
+    - name: DEPLOY - Create the VLANs for all SVIs
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -32,10 +63,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    # All SVIs are pushed in a single edit-config, so they either all
-    # apply together or none of them do.
-    - name: Configure all SVIs
+    - name: DEPLOY - Configure all SVIs
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -71,20 +105,110 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: svi_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Read back all SVIs to confirm
-      ansible.netcommon.netconf_get:
-        source: running
-        filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <interface>
-                <Vlan/>
-              </interface>
-            </native>
-          </filter>
-      register: svi_result
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # Command 1 is "show vlan brief", then one section read per SVI, in the
+    # same order as the svis list. "$" stops Vlan10 from also matching Vlan100.
+    # Retries only when a deploy ran in this run (svi_deploy is defined).
+    - name: VALIDATE - Read the VLANs and SVIs back, retries after deploy
+      cisco.ios.ios_command:
+        commands: >-
+          {{ ['show vlan brief']
+             + (svis | map(attribute='vlan_id')
+                | map('regex_replace', '^(.*)$',
+                      'show running-config all | section ^interface Vlan\1$')
+                | list) }}
+      register: svi_read
+      until: >-
+        svi_deploy is not defined
+        or (svi_read is not failed
+            and (svi_read.stdout | default([]) | select | list | length)
+                == (svis | length) + 1)
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
 
-    - name: Show the result
+    - name: VALIDATE - Store the VLAN table as trimmed lines
+      set_fact:
+        vlan_lines: "{{ (svi_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
+        svi_sections: {}
+      tags: [validate, always]
+
+    # Pairs each VLAN id with its own section output.
+    - name: VALIDATE - Store each SVI section as trimmed lines
+      set_fact:
+        svi_sections: >-
+          {{ svi_sections | combine({ item.0: item.1 | map('trim') | list }) }}
+      loop: >-
+        {{ svis | map(attribute='vlan_id') | map('string') | list
+           | zip((svi_read.stdout_lines | default([]))[1:]) | list }}
+      loop_control:
+        label: "Vlan{{ item.0 }}"
+      tags: [validate, always]
+
+    # One result per SVI and check type. The expected line is built from the
+    # same svis values the deploy used.
+    - name: VALIDATE - Check each SVI and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'svi',
+               'check':    'Vlan' ~ item.0.vlan_id ~ ' / ' ~ expected,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        vid: "{{ item.0.vlan_id | string }}"
+        expected: >-
+          {{ {
+               'vlan':         'vlan ' ~ vid ~ ' ' ~ item.0.vlan_name,
+               'description':  'description ' ~ item.0.description,
+               'ip':           'ip address ' ~ item.0.ip ~ ' ' ~ item.0.mask,
+               'redirects':    ('' if item.0.redirects | default(false) | bool else 'no ') ~ 'ip redirects',
+               'unreachables': ('' if item.0.unreachables | default(false) | bool else 'no ') ~ 'ip unreachables',
+               'proxy_arp':    ('' if item.0.proxy_arp | default(false) | bool else 'no ') ~ 'ip proxy-arp'
+             }[item.1] }}
+        found: >-
+          {{ ((vlan_lines
+                | select('match', '^' ~ vid ~ '\s+' ~ (item.0.vlan_name | regex_escape) ~ '\s')
+                | list | length) > 0)
+             if item.1 == 'vlan'
+             else (expected in (svi_sections[vid] | default([]))) }}
+      loop: >-
+        {{ svis | product(['vlan', 'description', 'ip', 'redirects',
+                           'unreachables', 'proxy_arp']) | list }}
+      loop_control:
+        label: "Vlan{{ item.0.vlan_id }} / {{ item.1 }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
       debug:
-        var: svi_result.output
+        msg: >-
+          {{ 'PASS' if svi_failed | length == 0 else 'FAIL' }}
+          ---> svi:
+          {{ svi_all | length - svi_failed | length }}
+          of {{ svi_all | length }} present
+          {{ '' if svi_failed | length == 0
+             else '- missing: ' + (svi_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        svi_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'svi') | list }}
+        svi_failed: >-
+          {{ svi_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: svi_failed | length > 0
+      tags: [validate, always]

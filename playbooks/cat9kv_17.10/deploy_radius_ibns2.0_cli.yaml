@@ -1,0 +1,666 @@
+---
+# =============================================================================
+# deploy_radius_ibns2_cli.yaml        (IOS-XE 17.10 and other releases
+#                                      affected by CSCwk31014)
+#
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# RADIUS servers and radius-server global settings: NETCONF (narrow
+# get_filter, rollback-on-error).
+# Class maps and the policy map: CLI. "class-map type control subscriber
+# match-none" breaks NETCONF get-config on releases before 17.12.6 /
+# 17.16.1 (bug CSCwk31014), and the policy map lives in the same <policy>
+# container, so neither can go over NETCONF here.
+# Everything else (group, dynamic author, AAA lines, VSA, dot1x, service
+# templates, ACL): CLI, as there is no YANG model for it.
+#
+# Variables (group_vars):
+#   radius_servers:            list of {ip, auth_port, acct_port, timeout, retransmit}
+#   radius_tester_username     automate-tester username
+#   radius_shared_key          (vault) RADIUS and dynamic-author key
+#   radius_deadtime            minutes, e.g. 15
+#   radius_source_interface    as the switch prints it, e.g. "Vlan100"
+#
+# NOT DEPLOYED HERE: "authentication convert-to new-style". It asks for a
+# yes/no confirmation and the conversion cannot be undone, so run it once by
+# hand (or check it is already done) before the first deploy.
+#
+# VALIDATION
+#   Never run on a switch yet. The checks are written from the standard
+#   config; on the first lab run, compare any FAIL against
+#   "show running-config all" and correct the check if the switch simply
+#   prints the line differently (as with the AAA fail-message).
+#   Keys are never validated - only that each server and client has one.
+#   The policy map is checked one event at a time, as a block.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The first CLI task after the NETCONF tasks
+#   retries (3 x 10 seconds), and the validation read retries too, but only
+#   when a deploy ran in this run.
+# =============================================================================
+
+- name: Configure and validate RADIUS and IBNS 2.0
+  hosts: access_switches
+  gather_facts: false
+
+  vars:
+    # -------------------------------------------------------------------------
+    # IBNS 2.0 class maps and policy map, written exactly as the switch prints
+    # them. The CLI deploy and the validation both use these lists.
+    # -------------------------------------------------------------------------
+    ibns_class_maps:
+      - name: AAA_SVR_DOWN_AUTHD_HOST
+        prematch: match-all
+        lines:
+          - match result-type aaa-timeout
+          - match authorization-status authorized
+      - name: AAA_SVR_DOWN_UNAUTHD_HOST
+        prematch: match-all
+        lines:
+          - match result-type aaa-timeout
+          - match authorization-status unauthorized
+      - name: DOT1X
+        prematch: match-all
+        lines:
+          - match method dot1x
+      - name: DOT1X_FAILED
+        prematch: match-all
+        lines:
+          - match method dot1x
+          - match result-type method dot1x authoritative
+      - name: DOT1X_NO_RESP
+        prematch: match-all
+        lines:
+          - match method dot1x
+          - match result-type method dot1x agent-not-found
+      - name: DOT1X_TIMEOUT
+        prematch: match-all
+        lines:
+          - match method dot1x
+          - match result-type method dot1x method-timeout
+          - match result-type method-timeout
+      - name: MAB
+        prematch: match-all
+        lines:
+          - match method mab
+      - name: MAB_FAILED
+        prematch: match-all
+        lines:
+          - match method mab
+          - match result-type method mab authoritative
+      - name: IN_CRITICAL_AUTH
+        prematch: match-any
+        lines:
+          - match activated-service-template CRITICAL_DATA_ACCESS
+          - match activated-service-template CRITICAL_VOICE_ACCESS
+      - name: NOT_IN_CRITICAL_AUTH
+        prematch: match-none
+        lines:
+          - match activated-service-template CRITICAL_DATA_ACCESS
+          - match activated-service-template CRITICAL_VOICE_ACCESS
+      - name: AUTHC_SUCCESS-AUTHZ_FAIL
+        prematch: match-all
+        lines:
+          - match authorization-status unauthorized
+          - match result-type success
+
+    ibns_policy_name: DOT1X_MAB_POLICY
+
+    # One entry per event. Each class is a list: the class line first, then
+    # its actions.
+    ibns_policy:
+      - event: event session-started match-all
+        classes:
+          - [10 class always do-until-failure,
+             10 authenticate using dot1x priority 10]
+      - event: event authentication-failure match-first
+        classes:
+          - [5 class DOT1X_FAILED do-until-failure,
+             10 terminate dot1x,
+             20 authenticate using mab priority 20]
+          - [10 class AAA_SVR_DOWN_UNAUTHD_HOST do-until-failure,
+             10 clear-authenticated-data-hosts-on-port,
+             20 activate service-template CRITICAL_DATA_ACCESS,
+             30 activate service-template CRITICAL_VOICE_ACCESS,
+             40 authorize,
+             50 pause reauthentication]
+          - [20 class AAA_SVR_DOWN_AUTHD_HOST do-until-failure,
+             10 pause reauthentication,
+             20 authorize]
+          - [30 class DOT1X_NO_RESP do-until-failure,
+             10 terminate dot1x,
+             20 authenticate using mab priority 20]
+          - [40 class DOT1X_TIMEOUT do-until-failure,
+             10 terminate dot1x,
+             20 authenticate using mab priority 20]
+          - [50 class MAB_FAILED do-until-failure,
+             10 terminate mab,
+             20 authentication-restart 60]
+          - [60 class always do-until-failure,
+             10 terminate dot1x,
+             20 terminate mab,
+             30 authentication-restart 60]
+      - event: event agent-found match-all
+        classes:
+          - [10 class always do-until-failure,
+             10 terminate mab,
+             20 authenticate using dot1x priority 10]
+      - event: event aaa-available match-all
+        classes:
+          - [10 class IN_CRITICAL_AUTH do-until-failure,
+             10 clear-session]
+          - [20 class NOT_IN_CRITICAL_AUTH do-until-failure,
+             10 resume reauthentication]
+      - event: event inactivity-timeout match-all
+        classes:
+          - [10 class always do-until-failure,
+             10 clear-session]
+      - event: event authentication-success match-all
+        classes:
+          - [10 class always do-until-failure,
+             10 activate service-template DEFAULT_LINKSEC_POLICY_SHOULD_SECURE]
+      - event: event violation match-all
+        classes:
+          - [10 class always do-until-failure,
+             10 restrict]
+      - event: event authorization-failure match-all
+        classes:
+          - [10 class AUTHC_SUCCESS-AUTHZ_FAIL do-until-failure,
+             10 authentication-restart 60]
+
+    # WEB_AUTH_REDIRECT: one "deny tcp ... eq 8443" per RADIUS server
+    # (10, 20, ...), then DNS, DHCP and permit. With two servers this gives
+    # 10-50, as in the standard config. Ports 53 and 67 are written as
+    # "domain" and "bootps" because that is how the switch prints them;
+    # sending "53" would make the next run clash on the sequence number.
+    web_auth_acl_lines: >-
+      {{ (radius_servers | map(attribute='ip')
+          | zip(range(10, (radius_servers | length) * 10 + 1, 10))
+          | map('join', ' ')
+          | map('regex_replace', '^(\S+) (\d+)$', '\2 deny tcp any host \1 eq 8443')
+          | list)
+         + [ ((radius_servers | length) * 10 + 10) ~ ' deny udp any any eq domain',
+             ((radius_servers | length) * 10 + 20) ~ ' deny udp any any eq bootps',
+             ((radius_servers | length) * 10 + 30) ~ ' permit ip any any' ] }}
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the RADIUS servers
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius>
+                {% for s in radius_servers %}
+                <server xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <id>RADIUS_{{ s.ip }}</id>
+                  <address>
+                    <ipv4>{{ s.ip }}</ipv4>
+                    <auth-port>{{ s.auth_port }}</auth-port>
+                    <acct-port>{{ s.acct_port }}</acct-port>
+                  </address>
+                  <timeout>{{ s.timeout }}</timeout>
+                  <retransmit>{{ s.retransmit }}</retransmit>
+                  <automate-tester>
+                    <username>{{ radius_tester_username }}</username>
+                    <ignore-acct-port/>
+                  </automate-tester>
+                  <pac>
+                    <key>
+                      <encryption>0</encryption>
+                      <key>{{ radius_shared_key }}</key>
+                    </key>
+                  </pac>
+                </server>
+                {% endfor %}
+              </radius>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      register: ibns_deploy
+      no_log: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure the RADIUS server global settings
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius-server>
+                <dead-criteria xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <time>5</time>
+                  <tries>3</tries>
+                </dead-criteria>
+                <deadtime xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">{{ radius_deadtime }}</deadtime>
+                <load-balance xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-aaa">
+                  <method>
+                    <least-outstanding/>
+                  </method>
+                </load-balance>
+              </radius-server>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <radius-server/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    # --- CLI ---------------------------------------------------------------
+    # First CLI task after the NETCONF commits: retries while the switch
+    # finishes applying them.
+    - name: DEPLOY - Configure the critical data service template
+      cisco.ios.ios_config:
+        lines:
+          - service-template CRITICAL_DATA_ACCESS
+      register: ibns_cli_first
+      until: ibns_cli_first is not failed
+      retries: 3
+      delay: 10
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure the critical voice service template
+      cisco.ios.ios_config:
+        lines:
+          - voice vlan
+        parents: service-template CRITICAL_VOICE_ACCESS
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # NOT_IN_CRITICAL_AUTH uses match-none, which NETCONF cannot read on
+    # 17.10 (CSCwk31014), so the class maps go over CLI.
+    - name: DEPLOY - Configure the subscriber class maps
+      cisco.ios.ios_config:
+        lines: "{{ item.lines }}"
+        parents: "class-map type control subscriber {{ item.prematch }} {{ item.name }}"
+      loop: "{{ ibns_class_maps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # The policy map sits beside the class maps under <policy>, so its
+    # NETCONF read would hit the same bug. One ios_config call per class,
+    # nested policy-map > event > class.
+    - name: DEPLOY - Configure the DOT1X_MAB_POLICY policy map
+      cisco.ios.ios_config:
+        lines: "{{ item.1[1:] }}"
+        parents:
+          - "policy-map type control subscriber {{ ibns_policy_name }}"
+          - "{{ item.0.event }}"
+          - "{{ item.1[0] }}"
+      loop: "{{ ibns_policy | subelements('classes') }}"
+      loop_control:
+        label: "{{ item.0.event }} / {{ item.1[0] }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure the RADIUS server group
+      cisco.ios.ios_config:
+        lines: >-
+          { (radius_servers | map(attribute='ip')
+              | map('regex_replace', '^(.*)$', 'server name RADIUS_\1') | list)
+             + ['ip radius source-interface ' ~ radius_source_interface,
+                'deadtime ' ~ radius_deadtime] }
+        parents: aaa group server radius RADIUS_GRP
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure RADIUS dynamic author
+      cisco.ios.ios_config:
+        lines: >-
+          { (radius_servers | map(attribute='ip')
+              | map('regex_replace', '^(.*)$', 'client \1 server-key ' ~ radius_shared_key) | list)
+             + ['load-balance method least-outstanding batch-size 30'] }
+        parents: aaa server radius dynamic-author
+      no_log: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # "aaa accounting Identity" is written with a capital I because that is
+    # how the switch prints it, which keeps ios_config from re-sending it.
+    - name: DEPLOY - Configure the RADIUS source interface and AAA for dot1x
+      cisco.ios.ios_config:
+        lines:
+          - "ip radius source-interface { radius_source_interface }"
+          - aaa authentication dot1x default group RADIUS_GRP
+          - aaa authorization network default group RADIUS_GRP
+          - aaa authorization auth-proxy default group RADIUS_GRP
+          - aaa accounting Identity default start-stop group RADIUS_GRP
+          - aaa accounting network default start-stop group RADIUS_GRP
+          - aaa accounting system default start-stop group RADIUS_GRP
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure RADIUS VSA and attribute settings
+      cisco.ios.ios_config:
+        lines:
+          - radius-server vsa send authentication
+          - radius-server vsa send accounting
+          - radius-server attribute 6 on-for-login-auth
+          - radius-server attribute 6 support-multiple
+          - radius-server attribute 8 include-in-access-req
+          - radius-server attribute 25 access-request include
+          - radius-server attribute 31 mac format ietf upper-case
+          - radius-server attribute 31 send nas-port-detail mac-only
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure dot1x global settings
+      cisco.ios.ios_config:
+        lines:
+          - dot1x system-auth-control
+          - dot1x critical eapol
+          - authentication critical recovery delay 2000
+          - no access-session mac-move deny
+          - authentication mac-move permit
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure the web auth redirect ACL
+      cisco.ios.ios_config:
+        lines: "{ web_auth_acl_lines }"
+        parents: ip access-list extended WEB_AUTH_REDIRECT
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # One read per area, plus one per RADIUS server and one per class map,
+    # built from the same variables the deploy uses. read_keys and read_cmds
+    # are in the same order, so each output can be stored under its key.
+    # The output contains (type 7 / type 6) keys, so these tasks use no_log.
+    - name: VALIDATE - Build the list of reads
+      set_fact:
+        read_keys: >-
+          {{ ['global', 'group', 'dynauth', 'acl', 'svc', 'policy']
+             + (radius_servers | map(attribute='ip')
+                | map('regex_replace', '^(.*)$', 'server \1') | list)
+             + (ibns_class_maps | map(attribute='name')
+                | map('regex_replace', '^(.*)$', 'class-map \1') | list) }}
+        read_cmds: >-
+          {{ ['show running-config all | include ^aaa |^authentication |^radius-server |^dot1x |^access-session |^no access-session |^ip radius source-interface',
+              'show running-config all | section ^aaa group server radius RADIUS_GRP$',
+              'show running-config all | section ^aaa server radius dynamic-author',
+              'show running-config all | section ^ip access-list extended WEB_AUTH_REDIRECT$',
+              'show running-config all | section ^service-template',
+              'show running-config all | section ^policy-map type control subscriber ' ~ ibns_policy_name ~ '$']
+             + (radius_servers | map(attribute='ip')
+                | map('regex_replace', '^(.*)$', 'show running-config all | section ^radius server RADIUS_\1$') | list)
+             + (ibns_class_maps | map(attribute='name')
+                | map('regex_replace', '^(.*)$', 'show running-config all | section ^class-map type control subscriber .* \1$') | list) }}
+      tags: [validate, always]
+
+    # Retries only when a deploy ran in this run (ibns_deploy is defined),
+    # until every read returns something.
+    - name: VALIDATE - Read the RADIUS and IBNS configuration back, retries after deploy
+      cisco.ios.ios_command:
+        commands: "{{ read_cmds }}"
+      register: ibns_read
+      until: >-
+        ibns_deploy is not defined
+        or (ibns_read is not failed
+            and (ibns_read.stdout | default([]) | select | list | length) == (read_cmds | length))
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      no_log: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    # Lines are trimmed and repeated spaces collapsed (ACL lines are padded).
+    - name: VALIDATE - Store each read as trimmed lines
+      set_fact:
+        ibns_lines: >-
+          {{ ibns_lines | default({}) | combine({ item.0:
+               item.1 | map('trim') | map('regex_replace', '\s+', ' ') | list }) }}
+      loop: "{{ read_keys | zip(ibns_read.stdout_lines | default([])) | list }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      no_log: true
+      tags: [validate, always]
+
+    # mode: exact   the whole line must match
+    # mode: prefix  the line must START with this text - used where the line
+    #               ends in a key that differs per device
+    - name: VALIDATE - Define the expected global, group, ACL and template lines
+      set_fact:
+        ibns_checks: >-
+          {{ [
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa authentication dot1x default group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa authorization network default group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa authorization auth-proxy default group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa accounting Identity default start-stop group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa accounting network default start-stop group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'aaa accounting system default start-stop group RADIUS_GRP'},
+               {'where': 'global', 'mode': 'exact', 'line': 'ip radius source-interface ' ~ radius_source_interface},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server vsa send authentication'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server vsa send accounting'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 6 on-for-login-auth'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 6 support-multiple'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 8 include-in-access-req'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 25 access-request include'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 31 mac format ietf upper-case'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server attribute 31 send nas-port-detail mac-only'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server dead-criteria time 5 tries 3'},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server deadtime ' ~ radius_deadtime},
+               {'where': 'global', 'mode': 'exact', 'line': 'radius-server load-balance method least-outstanding'},
+               {'where': 'global', 'mode': 'exact', 'line': 'dot1x system-auth-control'},
+               {'where': 'global', 'mode': 'exact', 'line': 'dot1x critical eapol'},
+               {'where': 'global', 'mode': 'exact', 'line': 'authentication critical recovery delay 2000'},
+               {'where': 'global', 'mode': 'exact', 'line': 'no access-session mac-move deny'},
+               {'where': 'group',  'mode': 'exact', 'line': 'aaa group server radius RADIUS_GRP'},
+               {'where': 'group',  'mode': 'exact', 'line': 'ip radius source-interface ' ~ radius_source_interface},
+               {'where': 'group',  'mode': 'exact', 'line': 'deadtime ' ~ radius_deadtime},
+               {'where': 'dynauth', 'mode': 'exact', 'line': 'aaa server radius dynamic-author'},
+               {'where': 'dynauth', 'mode': 'exact', 'line': 'load-balance method least-outstanding batch-size 30'},
+               {'where': 'acl',    'mode': 'exact', 'line': 'ip access-list extended WEB_AUTH_REDIRECT'},
+               {'where': 'svc',    'mode': 'exact', 'line': 'service-template CRITICAL_DATA_ACCESS'},
+               {'where': 'svc',    'mode': 'exact', 'line': 'service-template CRITICAL_VOICE_ACCESS'},
+               {'where': 'svc',    'mode': 'exact', 'line': 'voice vlan'}
+             ] }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the global, group, ACL and template lines and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    item.where ~ ' / ' ~ item.line,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        haystack: "{{ (ibns_lines | default({}))[item.where] | default([]) }}"
+        found: >-
+          {{ (item.line in haystack) if item.mode == 'exact'
+             else ((haystack | select('match', '^' ~ (item.line | regex_escape) ~ '(\s|$)')
+                    | list | length) > 0) }}
+      loop: "{{ ibns_checks }}"
+      loop_control:
+        label: "{{ item.where }} / {{ item.line }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Check the web auth redirect ACL entries and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    'acl / ' ~ item,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: "{{ item in ((ibns_lines | default({}))['acl'] | default([])) }}"
+      loop: "{{ web_auth_acl_lines }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    # Per RADIUS server: its own "radius server" block, its group member line
+    # and its dynamic-author client. Keys are only checked as present.
+    - name: VALIDATE - Check each RADIUS server and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    where ~ ' / ' ~ expected,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        s: "{{ item.0 }}"
+        where: "{{ {'group': 'group', 'dynauth': 'dynauth'}.get(item.1, 'server ' ~ s.ip) }}"
+        mode: "{{ 'prefix' if item.1 in ['key', 'dynauth'] else 'exact' }}"
+        expected: >-
+          {{ {
+               'header':    'radius server RADIUS_' ~ s.ip,
+               'address':   'address ipv4 ' ~ s.ip ~ ' auth-port ' ~ s.auth_port ~ ' acct-port ' ~ s.acct_port,
+               'timeout':   'timeout ' ~ s.timeout,
+               'retransmit': 'retransmit ' ~ s.retransmit,
+               'tester':    'automate-tester username ' ~ radius_tester_username ~ ' ignore-acct-port',
+               'key':       'pac key',
+               'group':     'server name RADIUS_' ~ s.ip,
+               'dynauth':   'client ' ~ s.ip ~ ' server-key'
+             }[item.1] }}
+        haystack: "{{ (ibns_lines | default({}))[where] | default([]) }}"
+        found: >-
+          {{ (expected in haystack) if mode == 'exact'
+             else ((haystack | select('match', '^' ~ (expected | regex_escape) ~ '(\s|$)')
+                    | list | length) > 0) }}
+      loop: >-
+        {{ radius_servers | product(['header', 'address', 'timeout', 'retransmit',
+                                     'tester', 'key', 'group', 'dynauth']) | list }}
+      loop_control:
+        label: "{{ item.0.ip }} / {{ item.1 }}"
+      tags: [validate, always]
+
+    # Each class map is read as its own section, so "match method dot1x"
+    # under DOT1X cannot satisfy the check for DOT1X_FAILED.
+    - name: VALIDATE - Check each class map and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    'class-map ' ~ item.0.name ~ ' / ' ~ item.1,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: "{{ item.1 in ((ibns_lines | default({}))['class-map ' ~ item.0.name] | default([])) }}"
+      loop: "{{ ibns_class_maps | subelements('lines') }}"
+      loop_control:
+        label: "{{ item.0.name }} / {{ item.1 }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Check each class map header and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    'class-map ' ~ item.name ~ ' / ' ~ header,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        header: "class-map type control subscriber {{ item.prematch }} {{ item.name }}"
+        found: "{{ header in ((ibns_lines | default({}))['class-map ' ~ item.name] | default([])) }}"
+      loop: "{{ ibns_class_maps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags: [validate, always]
+
+    # The same action lines (e.g. "10 terminate dot1x") appear under several
+    # classes, so each EVENT is checked as one block: the event line, then
+    # every class and action under it, in order and back to back.
+    - name: VALIDATE - Check each policy map event and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'radius ibns',
+               'check':    'policy-map ' ~ ibns_policy_name ~ ' / ' ~ item.event,
+               'expected': 'block present',
+               'actual':   'block present' if found else 'missing or different',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        block: "{{ ([item.event] + (item.classes | flatten(levels=1))) | join('\n') }}"
+        policy_text: "{{ (ibns_lines | default({}))['policy'] | default([]) | join('\n') }}"
+        found: "{{ ('\n' ~ block ~ '\n') in ('\n' ~ policy_text ~ '\n') }}"
+      loop: "{{ ibns_policy }}"
+      loop_control:
+        label: "{{ item.event }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if ibns_failed | length == 0 else 'FAIL' }}
+          ---> radius ibns:
+          {{ ibns_all | length - ibns_failed | length }}
+          of {{ ibns_all | length }} present
+          {{ '' if ibns_failed | length == 0
+             else '- missing: ' + (ibns_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        ibns_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'radius ibns') | list }}
+        ibns_failed: >-
+          {{ ibns_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: ibns_failed | length > 0
+      tags: [validate, always]

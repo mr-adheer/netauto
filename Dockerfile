@@ -54,3 +54,5 @@ RUN ansible-galaxy collection install -r /tmp/requirements.yml
 WORKDIR /netauto-repo
 
 CMD ["/bin/bash"]
+
+RUN git config --global --add safe.directory /netauto-repo

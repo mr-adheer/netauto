@@ -2,8 +2,9 @@
 # =============================================================================
 # deploy_dns_domain_name.yaml
 #
-#   ansible-playbook deploy_dns_domain_name.yaml                 -> validate only
-#   ansible-playbook deploy_dns_domain_name.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
 # Fully supported by the YANG model, so no CLI fallback is needed for the
 # deployment. Validation reads over CLI because "show running-config all"
@@ -13,6 +14,12 @@
 #   <lookup>false</lookup>  = "no ip domain lookup"
 #   <no-vrf>                = a name server in the global table, one element
 #                             per server
+#
+# NETCONF uses error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# After a deploy in the same run, the validation read retries (3 x 10
+# seconds), because IOS-XE applies a NETCONF commit in the background.
 #
 # NOTE: get_filter is required on every NETCONF task. See Cisco bug
 # CSCwk31014.
@@ -27,7 +34,7 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Configure DNS servers, domain name and disable lookup
+    - name: DEPLOY - Configure DNS servers, domain name and disable lookup
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -55,49 +62,48 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: dns_deploy
       vars:
         ansible_connection: netconf
         ansible_port: 830
-      tags:
-        - deploy
-        - never
+      tags: [deploy, never]
 
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read the DNS configuration
+    # Retries only when a deploy ran in this run (dns_deploy is defined).
+    - name: VALIDATE - Read the DNS configuration back, retries after deploy
       cisco.ios.ios_command:
         commands:
           - show running-config all | include ^ip domain|^no ip domain|^ip name-server
       register: dns_read
+      until: >-
+        dns_deploy is not defined
+        or (dns_read is not failed
+            and ('ip domain name ' ~ domain_name) in (dns_read.stdout[0] | default('')))
+      retries: 3
+      delay: 10
+      ignore_errors: true
       vars:
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Store the output as trimmed lines
+    - name: VALIDATE - Store the output as trimmed lines
       set_fact:
-        dns_lines: "{{ dns_read.stdout_lines[0] | map('trim') | list }}"
-      tags:
-        - validate
-        - always
+        dns_lines: "{{ (dns_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
+      tags: [validate, always]
 
-    # The two name servers may render on one line or two depending on
-    # platform, so each is checked by looking for the address rather than
-    # by exact whole-line match.
-    - name: Define what should be present
+    - name: VALIDATE - Define the expected lines
       set_fact:
         dns_checks:
           - "no ip domain lookup"
           - "ip domain name {{ domain_name }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Evaluate the line checks
+    - name: VALIDATE - Check each line and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
@@ -110,43 +116,46 @@
       loop: "{{ dns_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Evaluate the name servers
+    # The name servers may be on one line or on separate lines, so each
+    # address is looked for as a whole word in the "ip name-server" lines.
+    # regex_escape stops the dots acting as wildcards, and the space/end
+    # boundary stops 10.1.1.1 from matching 10.1.1.10.
+    - name: VALIDATE - Check each name server and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
                'feature':  'dns',
                'check':    'name-server ' ~ item,
                'expected': item,
-               'actual':   item if (dns_lines | select('search', 'name-server') | join(' ')) is search(item) else 'missing',
-               'result':   'PASS' if (dns_lines | select('search', 'name-server') | join(' ')) is search(item) else 'FAIL'
+               'actual':   item if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
              }] }}
+      vars:
+        ns_text: "{{ dns_lines | select('match', '^ip name-server') | join(' ') }}"
+        found: "{{ ns_text is search('(^|\\s)' ~ (item | regex_escape) ~ '(\\s|$)') }}"
       loop:
         - "{{ dns_server_ip_1 }}"
         - "{{ dns_server_ip_2 }}"
       loop_control:
         label: "{{ item }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if dns_failed | length == 0 else 'FAIL' }}
           ---> dns:
-          {{ 4 - dns_failed | length }} of 4 present
+          {{ dns_all | length - dns_failed | length }}
+          of {{ dns_all | length }} present
           {{ '' if dns_failed | length == 0
              else '- missing: ' + (dns_failed | map(attribute='check') | join('; ')) }}
       vars:
-        dns_failed: >-
+        dns_all: >-
           {{ validation_results
-             | selectattr('feature', 'equalto', 'dns')
-             | selectattr('result', 'equalto', 'FAIL') | list }}
+             | selectattr('feature', 'equalto', 'dns') | list }}
+        dns_failed: >-
+          {{ dns_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: dns_failed | length > 0
-      tags:
-        - validate
-        - always
+      tags: [validate, always]

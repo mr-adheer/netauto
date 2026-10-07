@@ -33,7 +33,7 @@
         run_human: "{{ lookup('pipe', 'date -u +%Y-%m-%d\\ %H:%M:%S\\ UTC') }}"
       run_once: true
       delegate_to: localhost
-      tags: [always]
+      tags: [validate, never]
 
     - name: Parse show version
       ansible.utils.cli_parse:
@@ -42,12 +42,12 @@
           name: ansible.netcommon.pyats
       register: showver
       changed_when: false
-      tags: [always]
+      tags: [validate, never]
 
     - name: Store the device facts
       set_fact:
         dev_facts: "{{ showver.parsed.version }}"
-      tags: [always]
+      tags: [validate, never]
 
     - name: Read the full running configuration
       cisco.ios.ios_command:
@@ -55,13 +55,13 @@
           - show running-config all
       register: runcfg
       changed_when: false
-      tags: [always]
+      tags: [validate, never]
 
     - name: Store it as trimmed lines
       set_fact:
         cfg: "{{ runcfg.stdout_lines[0] | map('trim') | list }}"
         validation_results: []
-      tags: [always]
+      tags: [validate, never]
 
     - name: Device
       debug:
@@ -70,4 +70,4 @@
           {{ dev_facts.chassis }} sn:{{ dev_facts.chassis_sn }}
           {{ dev_facts.version }}
           - {{ cfg | length }} config lines read
-      tags: [always]
+      tags: [validate, never]

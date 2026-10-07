@@ -1,5 +1,24 @@
 ---
-#configure hostname in devices that are in host_vars
+# =============================================================================
+# deploy_hostname.yaml
+#
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# Sets the hostname from host_vars/<switch>.yaml (variable: hostname).
+#
+# DEPLOY   NETCONF, candidate datastore, commit. rollback-on-error leaves
+#          nothing behind in the candidate if the edit fails.
+# VALIDATE Reads "show version" over SSH and parses it with pyATS (Genie).
+#          After a deploy in the same run, the read retries (3 x 10 seconds)
+#          until the new hostname shows up, because IOS-XE applies a NETCONF
+#          commit in the background.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
+
 - name: Configure and validate hostname
   hosts: all
   gather_facts: false
@@ -9,7 +28,7 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Push hostname to the candidate datastore and commit
+    - name: DEPLOY - Configure the hostname
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -25,49 +44,51 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: hostname_deploy
       vars:
         ansible_connection: netconf
         ansible_port: 830
-      tags:
-        - deploy
-        - never
+      tags: [deploy, never]
+
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read and parse hostname from show version
+    # Retries only when a deploy ran in this run (hostname_deploy is defined).
+    - name: VALIDATE - Read the hostname back, retries after deploy
       ansible.utils.cli_parse:
         command: show version
         parser:
           name: ansible.netcommon.pyats
       register: showver
+      until: >-
+        hostname_deploy is not defined
+        or (showver.parsed.version.hostname | default('')) == hostname
+      retries: 3
+      delay: 10
+      ignore_errors: true
       vars:
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags:
-        - validate
-        - always
+      tags: [validate, never]
 
-    - name: Record the result in memory
+    - name: VALIDATE - Check the hostname
       set_fact:
-        actual_hostname: "{{ showver.parsed.version.hostname }}"
-        hostname_ok: "{{ showver.parsed.version.hostname == hostname }}"
-      tags:
-        - validate
-        - always
+        actual_hostname: "{{ showver.parsed.version.hostname | default('not read') }}"
+        hostname_ok: "{{ (showver.parsed.version.hostname | default('')) == hostname }}"
+      tags: [validate, never]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if hostname_ok | bool else 'FAIL' }}
           ---> hostname: expected '{{ hostname }}',
           found '{{ actual_hostname }}'
       changed_when: not (hostname_ok | bool)
-      tags:
-        - validate
-        - always
+      tags: [validate, never]
 
-    - name: Record the result
+    - name: VALIDATE - Record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
@@ -77,6 +98,4 @@
                'actual':   actual_hostname,
                'result':   'PASS' if hostname_ok | bool else 'FAIL'
              }] }}
-      tags:
-        - validate
-        - always
+      tags: [validate, never]

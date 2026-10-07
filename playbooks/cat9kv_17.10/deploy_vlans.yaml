@@ -1,33 +1,53 @@
 ---
-# =============================================================
-# Layer 2 VLANs - NETCONF
+# =============================================================================
+# deploy_vlans.yaml
 #
-# Fully supported by the YANG model, no CLI fallback needed.
-# Structure verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
-# Note that <vlan-list> carries its OWN namespace
-# (Cisco-IOS-XE-vlan), different from the <native> namespace
-# around it. VLANs are an augmentation module.
+# Layer 2 VLANs from layer2_vlans (group_vars):
+#
+#   layer2_vlans:
+#     - { vlan_id: 10, name: USERS }
+#
+# Fully supported by the YANG model, no CLI fallback needed. Structure
+# verified against a real device dump (show running-config | format
+# netconf-xml).
+#
+# Note that <vlan-list> carries its OWN namespace (Cisco-IOS-XE-vlan),
+# different from the <native> namespace around it. VLANs are an
+# augmentation module.
 #
 # NOTE: VLAN 1 cannot be renamed - the device rejects it with
 # "Don't support configure vlan name". Do not include VLAN 1 in
 # layer2_vlans.
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# NETCONF uses error_option: rollback-on-error, so if one VLAN is rejected
+# none of them are applied.
+#
+# VALIDATION
+#   Reads "show vlan brief" (works whatever the VTP mode; VLANs are not in
+#   the running config in VTP server/client mode). Each VLAN must be listed
+#   with its id and name. "show vlan brief" cuts names at 32 characters, so
+#   the check compares the first 32. After a deploy in the same run, the
+#   read retries (3 x 10 seconds), because IOS-XE applies a NETCONF commit
+#   in the background.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-- name: Configure Layer 2 VLANs (NETCONF)
+- name: Configure and validate Layer 2 VLANs
   hosts: switches
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure VLANs
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the VLANs
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -50,18 +70,80 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: vlan_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Read back the VLANs to confirm
-      ansible.netcommon.netconf_get:
-        source: running
-        filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <vlan/>
-            </native>
-          </filter>
-      register: vlan_result
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # Retries only when a deploy ran in this run (vlan_deploy is defined),
+    # until the last VLAN in the list shows up.
+    - name: VALIDATE - Read the VLANs back, retries after deploy
+      cisco.ios.ios_command:
+        commands:
+          - show vlan brief
+      register: vlan_read
+      until: >-
+        vlan_deploy is not defined
+        or (vlan_read is not failed
+            and (vlan_read.stdout_lines[0] | default([])
+                 | select('match', '^' ~ (layer2_vlans | last).vlan_id ~ '\s')
+                 | list | length) > 0)
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
 
-    - name: Show the result
+    - name: VALIDATE - Store the VLAN table as trimmed lines
+      set_fact:
+        vlan_lines: "{{ (vlan_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
+      tags: [validate, always]
+
+    # A line such as "10   USERS   active   Gi1/0/1" must start with the id,
+    # then the name (first 32 characters), then a space.
+    - name: VALIDATE - Check each VLAN and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'vlans',
+               'check':    'vlan ' ~ item.vlan_id ~ ' ' ~ item.name,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: >-
+          {{ (vlan_lines
+              | select('match', '^' ~ item.vlan_id ~ '\s+'
+                                ~ ((item.name | string)[:32] | regex_escape) ~ '(\s|$)')
+              | list | length) > 0 }}
+      loop: "{{ layer2_vlans }}"
+      loop_control:
+        label: "{{ item.vlan_id }} {{ item.name }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
       debug:
-        var: vlan_result.output
+        msg: >-
+          {{ 'PASS' if vlan_failed | length == 0 else 'FAIL' }}
+          ---> vlans:
+          {{ vlan_all | length - vlan_failed | length }}
+          of {{ vlan_all | length }} present
+          {{ '' if vlan_failed | length == 0
+             else '- missing: ' + (vlan_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        vlan_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'vlans') | list }}
+        vlan_failed: >-
+          {{ vlan_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: vlan_failed | length > 0
+      tags: [validate, always]

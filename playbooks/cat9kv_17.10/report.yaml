@@ -26,7 +26,7 @@
       set_fact:
         passed: "{{ validation_results | selectattr('result', 'equalto', 'PASS') | list }}"
         failed: "{{ validation_results | selectattr('result', 'equalto', 'FAIL') | list }}"
-      tags: [always]
+      tags: [validate, never]
 
     - name: Create the report directory
       file:
@@ -34,7 +34,7 @@
         state: directory
       delegate_to: localhost
       run_once: true
-      tags: [always]
+      tags: [validate, never]
 
     # -------------------------------------------------------------------------
     # Per-device detail
@@ -82,7 +82,7 @@
           {% endfor %}
           =======================================================================
       delegate_to: localhost
-      tags: [always]
+      tags: [validate, never]
 
     # -------------------------------------------------------------------------
     # Site summary. run_once, reading every device through hostvars.
@@ -115,10 +115,10 @@
           =======================================================================
       delegate_to: localhost
       run_once: true
-      tags: [always]
+      tags: [validate, never]
 
     - name: Where the reports went
       debug:
         msg: "Reports: {{ report_dir }}/"
       run_once: true
-      tags: [always]
+      tags: [validate, never]

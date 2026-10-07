@@ -1,31 +1,54 @@
 ---
-# =============================================================
-# AAA, management ACL and line configuration
+# =============================================================================
+# deploy_local_aaa.yaml
+#
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# AAA, management ACL and line configuration.
 # NETCONF where the YANG model supports it, CLI where it does not.
+# The two original plays are merged into one; each task carries its own
+# connection settings.
 #
 # CLI fallback is required for:
 #   - aaa authentication fail-message  (no YANG element)
 #   - aaa login display last-success / last-failure
 #     (the YANG <display> leaf holds only ONE value)
 #
-# NOTE: run the local credentials playbook BEFORE this one.
-# This playbook sets "authentication login default local", which
-# requires the local users to already exist.
-# =============================================================
+# NETCONF tasks use error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit to the running configuration in the
+#   background, and refuses CLI configuration while it does. So the first CLI
+#   task after the NETCONF tasks retries (3 x 10 seconds), and the validation
+#   read retries too, but only when a deploy ran in this run.
+#
+# NOTE: run the local credentials playbook BEFORE this one. This playbook
+# sets "authentication login default local", which requires the local users
+# to already exist.
+#
+# VALIDATION
+#   The line configuration is read as sections ("line con 0", "line vty 0 15")
+#   because lines such as "login authentication default" appear under both
+#   and a flat search could not tell them apart.
+#   The management ACL is read as its own section for the same reason.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-# -------------------------------------------------------------
-# PLAY 1 - NETCONF
-# -------------------------------------------------------------
-- name: Configure AAA, ACL and lines (NETCONF)
+- name: Configure and validate local AAA
   hosts: access_switches
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
   gather_facts: false
 
   tasks:
 
-    - name: Configure privilege exec levels
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure privilege exec levels
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -68,8 +91,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure AAA
+    - name: DEPLOY - Configure AAA
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -125,8 +153,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure management ACL
+    - name: DEPLOY - Configure the management ACL
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -166,8 +199,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure console and VTY lines
+    - name: DEPLOY - Configure the console and VTY lines
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -234,29 +272,153 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: aaa_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-# -------------------------------------------------------------
-# PLAY 2 - CLI fallback
-# -------------------------------------------------------------
-- name: Configure AAA items unsupported by NETCONF (CLI fallback)
-  hosts: access_switches
-  vars:
-    ansible_connection: network_cli
-    ansible_port: 22
-  gather_facts: false
-
-  tasks:
-
+    # --- CLI fallback ------------------------------------------------------
     # No YANG element exists for the AAA fail-message.
-    - name: Configure AAA fail-message
+    # First CLI task after the NETCONF commits: retries while the switch
+    # finishes applying them (CLI config is refused during that sync).
+    - name: DEPLOY - Configure the AAA fail-message
       cisco.ios.ios_config:
         lines:
           - aaa authentication fail-message  * LOGIN FAILED *
+      register: fail_message_deploy
+      until: fail_message_deploy is not failed
+      retries: 3
+      delay: 10
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
 
-    # The YANG <display> leaf holds only one value, so the other
-    # two settings must be applied over CLI.
-    - name: Configure the remaining aaa login display settings
+    # The YANG <display> leaf holds only one value, so the other two settings
+    # must be applied over CLI.
+    - name: DEPLOY - Configure the remaining aaa login display settings
       cisco.ios.ios_config:
         lines:
           - aaa login display last-success
           - aaa login display last-failure
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    - name: VALIDATE - Read the AAA, privilege, ACL and line sections back, retries after deploy
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^aaa |^privilege exec
+          - show running-config all | section ^ip access-list standard MGMT_ACL
+          - show running-config all | section ^line con 0
+          - show running-config all | section ^line vty 0 15
+      register: aaa_read
+      until: >-
+        aaa_deploy is not defined
+        or (aaa_read is not failed
+            and (aaa_read.stdout[3] | default('') | length) > 0)
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    - name: VALIDATE - Store each section as trimmed lines
+      set_fact:
+        aaa_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[0] | map('trim') | list }}"
+        acl_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[1] | map('trim') | list }}"
+        con_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[2] | map('trim') | list }}"
+        vty_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[3] | map('trim') | list }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Define the expected lines
+      set_fact:
+        aaa_checks:
+          # --- global aaa and privilege lines ---
+          - { where: "aaa",     line: "aaa new-model" }
+          - { where: "aaa",     line: "aaa session-id common" }
+          - { where: "aaa",     line: "aaa authentication login default local" }
+          - { where: "aaa",     line: "aaa authentication enable default enable" }
+          - { where: "aaa",     line: "aaa authorization exec default local if-authenticated" }
+          - { where: "aaa",     line: "aaa authorization config-commands" }
+          - { where: "aaa",     line: "aaa authorization console" }
+          - { where: "aaa",     line: "aaa accounting update newinfo periodic 2880" }
+          # Deployed as "* LOGIN FAILED *". IOS stores the delimiters as ^C.
+          - { where: "aaa",     line: "aaa authentication fail-message ^C LOGIN FAILED ^C" }
+          - { where: "aaa",     line: "aaa login display last-success" }
+          - { where: "aaa",     line: "aaa login display last-failure" }
+          - { where: "aaa",     line: "aaa login display number-failures" }
+          - { where: "aaa",     line: "aaa login success-track-conf-time 0" }
+          - { where: "aaa",     line: "privilege exec level 15 configure terminal" }
+          - { where: "aaa",     line: "privilege exec level 15 configure" }
+          - { where: "aaa",     line: "privilege exec level 7 show running-config" }
+          - { where: "aaa",     line: "privilege exec level 7 show" }
+          - { where: "aaa",     line: "privilege exec level 7 clear counters" }
+          - { where: "aaa",     line: "privilege exec level 7 clear" }
+          - { where: "aaa",     line: "privilege exec level 7 copy running-config" }
+          - { where: "aaa",     line: "privilege exec level 7 ping" }
+          - { where: "aaa",     line: "privilege exec level 7 traceroute" }
+          - { where: "aaa",     line: "privilege exec level 7 verify" }
+          # --- management ACL ---
+          - { where: "mgmt acl", line: "ip access-list standard MGMT_ACL" }
+          # --- console line ---
+          - { where: "line con 0", line: "exec-timeout 5 0" }
+          - { where: "line con 0", line: "login authentication default" }
+          - { where: "line con 0", line: "logging synchronous" }
+          # --- vty lines ---
+          - { where: "line vty 0 15", line: "access-class MGMT_ACL in vrf-also" }
+          - { where: "line vty 0 15", line: "authorization exec default" }
+          - { where: "line vty 0 15", line: "exec-timeout 5 0" }
+          - { where: "line vty 0 15", line: "login authentication default" }
+          - { where: "line vty 0 15", line: "logging synchronous" }
+          - { where: "line vty 0 15", line: "transport input ssh" }
+          - { where: "line vty 0 15", line: "transport output none" }
+          - { where: "line vty 0 15", line: "transport preferred none" }
+      tags: [validate, always]
+
+    - name: VALIDATE - Check each line and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'local aaa',
+               'check':    item.where ~ ' / ' ~ item.line,
+               'expected': 'present',
+               'actual':   'present' if item.line in haystack else 'missing',
+               'result':   'PASS' if item.line in haystack else 'FAIL'
+             }] }}
+      vars:
+        haystack: >-
+          {{ aaa_lines if item.where == 'aaa'
+             else acl_lines if item.where == 'mgmt acl'
+             else con_lines if item.where == 'line con 0'
+             else vty_lines }}
+      loop: "{{ aaa_checks }}"
+      loop_control:
+        label: "{{ item.where }} / {{ item.line }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if aaa_failed | length == 0 else 'FAIL' }}
+          ---> local aaa:
+          {{ aaa_checks | length - aaa_failed | length }}
+          of {{ aaa_checks | length }} present
+          {{ '' if aaa_failed | length == 0
+             else '- missing: ' + (aaa_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        aaa_failed: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'local aaa')
+             | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: aaa_failed | length > 0
+      tags: [validate, always]

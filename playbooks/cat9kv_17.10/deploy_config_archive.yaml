@@ -2,28 +2,30 @@
 # =============================================================================
 # deploy_config_archive.yaml
 #
-#   ansible-playbook deploy_config_archive.yaml                 -> validate only
-#   ansible-playbook deploy_config_archive.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
-# NETCONF where the YANG model supports it, CLI where it does not.
+# Config archive and scheduled backups.
+# NETCONF where the YANG model supports it, CLI where it does not. Each task
+# carries its own connection settings.
 #
-# CLI fallback required for:
+# CLI is required for:
 #   - kron occurrences and policy-lists (no YANG element exists)
 #   - archive "hidekeys" and "maximum"  (absent from the model)
 #
-# The two original plays are merged into one. Each task carries its own
-# connection settings, so NETCONF and CLI tasks sit side by side.
-#
-# NOTE: get_filter is required on every NETCONF task. See Cisco bug
-# CSCwk31014 - a "class-map type control subscriber match-none" in the
-# running config breaks the get-config that netconf_config performs
-# before writing.
+# WHY THE FIRST CLI TASK RETRIES
+#   IOS-XE applies a NETCONF commit in the background. While that sync runs,
+#   CLI configuration is refused, so the first CLI task after the NETCONF
+#   commit retries for up to 30 seconds.
 #
 # VALIDATION
 #   Reads the archive and kron sections over CLI and checks each expected
-#   line is present. Section reads are used rather than a flat search
-#   because lines such as "logging enable" and "maximum 10" are ambiguous
-#   on their own.
+#   line. Section reads are used rather than a flat search because lines such
+#   as "logging enable" and "maximum 10" are ambiguous on their own.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
 # =============================================================================
 
 - name: Configure and validate config archive
@@ -35,8 +37,21 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Configure config archive
+    - name: DEPLOY - Configure the config archive
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
       ansible.netcommon.netconf_config:
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <archive/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
@@ -60,23 +75,15 @@
               </archive>
             </native>
           </config>
-        get_filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <archive/>
-            </native>
-          </filter>
-        target: candidate
-        commit: true
-      vars:
-        ansible_connection: netconf
-        ansible_port: 830
-      tags:
-        - deploy
-        - never
 
+    # --- CLI: settings the YANG model cannot hold ---------------------------
     # hidekeys and maximum do not appear in the YANG model.
-    - name: Configure archive settings not in the YANG model
+    # First CLI task after the NETCONF commit, so it retries.
+    - name: DEPLOY - Configure archive hidekeys and maximum
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
       cisco.ios.ios_config:
         lines:
           - hidekeys
@@ -84,88 +91,74 @@
         parents:
           - archive
           - log config
+      register: arch_cli
+      until: arch_cli is not failed
+      retries: 3
+      delay: 10
+
+    # No YANG element exists for kron at all.
+    - name: DEPLOY - Configure kron occurrence for the monthly save
       vars:
         ansible_connection: network_cli
         ansible_port: 22
-      tags:
-        - deploy
-        - never
-
-    # No YANG element exists for kron at all.
-    - name: Configure kron occurrence - monthly save
+      tags: [deploy, never]
       cisco.ios.ios_config:
         lines:
           - policy-list save
         parents: kron occurrence one-month at 11:59 1 recurring
+
+    - name: DEPLOY - Configure kron occurrence for the daily backup
       vars:
         ansible_connection: network_cli
         ansible_port: 22
-      tags:
-        - deploy
-        - never
-
-    - name: Configure kron occurrence - daily backup
+      tags: [deploy, never]
       cisco.ios.ios_config:
         lines:
           - policy-list CONFIGURATION_BACKUP
         parents: kron occurrence Backup at 12:00 1 recurring
+
+    - name: DEPLOY - Configure kron policy-list save
       vars:
         ansible_connection: network_cli
         ansible_port: 22
-      tags:
-        - deploy
-        - never
-
-    - name: Configure kron policy-list - save
+      tags: [deploy, never]
       cisco.ios.ios_config:
         lines:
           - cli write
         parents: kron policy-list save
+
+    - name: DEPLOY - Configure kron policy-list CONFIGURATION_BACKUP
       vars:
         ansible_connection: network_cli
         ansible_port: 22
-      tags:
-        - deploy
-        - never
-
-    - name: Configure kron policy-list - configuration backup
+      tags: [deploy, never]
       cisco.ios.ios_config:
         lines:
           - cli archive config
         parents: kron policy-list CONFIGURATION_BACKUP
-      vars:
-        ansible_connection: network_cli
-        ansible_port: 22
-      tags:
-        - deploy
-        - never
 
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read the archive and kron sections
-      cisco.ios.ios_command:
-        commands:
-          - show running-config all | section ^archive
-          - show running-config all | section ^kron
-      register: arch_read
+    - name: VALIDATE - Read the archive and kron configuration back
       vars:
         ansible_connection: network_cli
         ansible_port: 22
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | section ^archive$
+          - show running-config all | section ^kron
+      register: arch_read
       changed_when: false
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Store the sections as trimmed lines
+    - name: VALIDATE - Store each section as trimmed lines
       set_fact:
         archive_lines: "{{ arch_read.stdout_lines[0] | map('trim') | list }}"
         kron_lines: "{{ arch_read.stdout_lines[1] | map('trim') | list }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Define what should be present
+    - name: VALIDATE - Define the expected archive and kron lines
       set_fact:
         archive_checks:
           - "logging enable"
@@ -185,16 +178,14 @@
           - "policy-list CONFIGURATION_BACKUP"
           - "cli write"
           - "cli archive config"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Evaluate the archive checks
+    - name: VALIDATE - Check the archive settings and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
                'feature':  'config archive',
-               'check':    item,
+               'check':    'archive / ' ~ item,
                'expected': 'present',
                'actual':   'present' if item in archive_lines else 'missing',
                'result':   'PASS' if item in archive_lines else 'FAIL'
@@ -202,16 +193,14 @@
       loop: "{{ archive_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Evaluate the kron checks
+    - name: VALIDATE - Check the kron settings and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
                'feature':  'config archive',
-               'check':    item,
+               'check':    'kron / ' ~ item,
                'expected': 'present',
                'actual':   'present' if item in kron_lines else 'missing',
                'result':   'PASS' if item in kron_lines else 'FAIL'
@@ -219,25 +208,22 @@
       loop: "{{ kron_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if arch_failed | length == 0 else 'FAIL' }}
           ---> config archive:
-          {{ (archive_checks | length + kron_checks | length) - (arch_failed | length) }}
-          of {{ archive_checks | length + kron_checks | length }} present
+          {{ arch_all | length - arch_failed | length }}
+          of {{ arch_all | length }} present
           {{ '' if arch_failed | length == 0
              else '- missing: ' + (arch_failed | map(attribute='check') | join('; ')) }}
       vars:
-        arch_failed: >-
+        arch_all: >-
           {{ validation_results
-             | selectattr('feature', 'equalto', 'config archive')
-             | selectattr('result', 'equalto', 'FAIL') | list }}
+             | selectattr('feature', 'equalto', 'config archive') | list }}
+        arch_failed: >-
+          {{ arch_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: arch_failed | length > 0
-      tags:
-        - validate
-        - always
+      tags: [validate, always]

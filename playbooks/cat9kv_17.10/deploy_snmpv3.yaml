@@ -1,37 +1,73 @@
 ---
-# =============================================================
-# SNMPv3 - NETCONF where supported, CLI where not
+# =============================================================================
+# deploy_snmpv3.yaml
 #
-# Structure verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+#   ansible-playbook deploy_snmpv3.yaml --tags deploy -e rotate_passwords=true
+#       -> deploy and re-apply the SNMPv3 user with the passwords from the vault
+#
+# SNMPv3 - NETCONF where supported, CLI where not. Structure verified against
+# a real device dump (show running-config | format netconf-xml).
 #
 # CLI fallback required for:
-#   - snmp-server user         (SNMPv3 users are not represented
-#                               in the YANG model at all)
-#   - snmp mib flash cache     (no element)
-#   - process cpu statistics limit  (no element)
-#   - snmp-server enable traps      (the model enumerates every
-#                               individual trap; the CLI form
-#                               "enable traps" with no argument
-#                               enables the lot and is simpler)
+#   - snmp-server user               (not in the YANG model, and not shown in
+#                                     "show running-config" - use "show snmp user")
+#   - snmp mib flash cache           (no element)
+#   - process cpu statistics limit   (no element)
+#   - snmp-server enable traps       (the model enumerates every trap; the bare
+#                                     CLI form enables them all)
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# WHY THE USER IS ONLY CREATED WHEN ABSENT
+#   The user is not in the running config, so ios_config cannot tell it is
+#   already there and would re-send it (with its passwords) on every run.
+#   The playbook reads "show snmp user" first and only creates the user if it
+#   is missing, unless -e rotate_passwords=true is given.
+#
+# Variables (group_vars):
+#   snmp_acl_entries    list of {sequence, grant, source: {host: x} or {any: true}}
+#   snmp_group_name, snmp_user_name, snmp_host_ip, snmp_location
+#   snmp_trap_source_type / snmp_trap_source_number   e.g. "Vlan" / "100"
+#   snmp_auth_password, snmp_priv_password            (vault)
+#   cpu_rising_threshold, cpu_rising_interval, cpu_falling_threshold,
+#   cpu_falling_interval, cpu_stats_entry_percentage, cpu_stats_size
+#
+# NETCONF tasks use error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The first CLI configuration task after the
+#   NETCONF tasks retries (3 x 10 seconds), and the validation read retries
+#   too, but only when a deploy ran in this run.
+#
+# VALIDATION
+#   Never run on a switch yet. On the first lab run, compare any FAIL with
+#   "show running-config all" / "show snmp user" and correct the check if
+#   the switch simply prints the line differently - in particular the
+#   SNMP_ACL entries (a standard ACL usually prints "permit 10.1.1.1 log",
+#   without the word "host").
+#   Passwords are never validated - only that the user exists in the right
+#   group with SHA authentication and AES-128 privacy.
+#   "snmp-server enable traps" (bare) is not shown by the switch, which lists
+#   each trap instead, so only "cpu threshold" is checked.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-# -------------------------------------------------------------
-# PLAY 1 - NETCONF
-# -------------------------------------------------------------
-- name: Configure SNMPv3 (NETCONF)
+- name: Configure and validate SNMPv3
   hosts: all
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure the SNMP access ACL
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the SNMP access ACL
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -70,8 +106,14 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: snmp_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure SNMP group, host, location and trap source
+    - name: DEPLOY - Configure the SNMP group, host, location and trap source
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -111,8 +153,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure SNMP ifindex persistence
+    - name: DEPLOY - Configure SNMP ifindex persistence
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -134,8 +181,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure the CPU threshold
+    - name: DEPLOY - Configure the CPU threshold
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -176,39 +228,201 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-# -------------------------------------------------------------
-# PLAY 2 - CLI fallback
-# -------------------------------------------------------------
-- name: Configure SNMP items not in the YANG model (CLI)
-  hosts: all
-  gather_facts: false
-  vars:
-    ansible_connection: network_cli
-    ansible_port: 22
+    # --- CLI ---------------------------------------------------------------
+    - name: DEPLOY - Read the existing SNMP users
+      cisco.ios.ios_command:
+        commands:
+          - show snmp user
+      register: snmp_users_before
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [deploy, never]
 
-  tasks:
-
-    # SNMPv3 users are not represented in the YANG model, and do
-    # not appear in "show running-config" either - use
-    # "show snmp user" to verify.
-    - name: Configure the SNMPv3 user
+    # First CLI configuration task after the NETCONF commits: retries while
+    # the switch finishes applying them.
+    - name: DEPLOY - Create the SNMPv3 user if absent
       cisco.ios.ios_config:
         lines:
           - "snmp-server user {{ snmp_user_name }} {{ snmp_group_name }} v3 auth sha {{ snmp_auth_password }} priv aes 128 {{ snmp_priv_password }}"
+      register: snmp_user_result
+      until: snmp_user_result is not failed
+      retries: 3
+      delay: 10
+      when: >-
+        (rotate_passwords | default(false) | bool)
+        or not ((snmp_users_before.stdout[0] | default(''))
+                is search('User name: ' ~ (snmp_user_name | regex_escape) ~ '\s*$', multiline=True))
       no_log: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
 
-    # The model enumerates every individual trap; the bare CLI
-    # form enables them all and is far simpler.
-    - name: Enable SNMP traps
+    # The model enumerates every individual trap; the bare CLI form enables
+    # them all and is far simpler.
+    - name: DEPLOY - Enable SNMP traps
       cisco.ios.ios_config:
         lines:
           - snmp-server enable traps
           - snmp-server enable traps cpu threshold
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
 
     # No YANG elements for these two.
-    - name: Configure MIB flash cache and CPU statistics limit
+    - name: DEPLOY - Configure the MIB flash cache and CPU statistics limit
       cisco.ios.ios_config:
         lines:
           - snmp mib flash cache
           - "process cpu statistics limit entry-percentage {{ cpu_stats_entry_percentage }} size {{ cpu_stats_size }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # Retries only when a deploy ran in this run (snmp_deploy is defined),
+    # until the SNMP group line shows up.
+    - name: VALIDATE - Read the SNMP configuration back, retries after deploy
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^snmp|^process cpu
+          - show running-config all | section ^ip access-list standard SNMP_ACL$
+          - show snmp user
+      register: snmp_read
+      until: >-
+        snmp_deploy is not defined
+        or (snmp_read is not failed
+            and ('snmp-server group ' ~ snmp_group_name) in (snmp_read.stdout[0] | default('')))
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    # The user's block in "show snmp user" is everything from its
+    # "User name:" line to the next one.
+    - name: VALIDATE - Store the output as trimmed lines
+      set_fact:
+        snmp_lines: "{{ (snmp_read.stdout_lines | default([[], [], []]))[0] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+        snmp_acl_lines: "{{ (snmp_read.stdout_lines | default([[], [], []]))[1] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
+        snmp_user_block: >-
+          {{ ((snmp_read.stdout | default(['', '', '']))[2]
+              | regex_replace('\r', '')).split('User name: ')
+             | select('match', (snmp_user_name | regex_escape) ~ '\s*\n')
+             | first | default('') }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Define the expected lines
+      set_fact:
+        snmp_checks: >-
+          {{ [
+               'snmp-server group ' ~ snmp_group_name ~ ' v3 priv access SNMP_ACL',
+               'snmp-server host ' ~ snmp_host_ip ~ ' version 3 priv ' ~ snmp_user_name,
+               'snmp-server location ' ~ snmp_location,
+               'snmp-server trap-source ' ~ snmp_trap_source_type ~ snmp_trap_source_number,
+               'snmp-server enable traps cpu threshold',
+               'snmp ifmib ifindex persist',
+               'snmp mib flash cache',
+               'process cpu threshold type total rising ' ~ cpu_rising_threshold
+                 ~ ' interval ' ~ cpu_rising_interval
+                 ~ ' falling ' ~ cpu_falling_threshold
+                 ~ ' interval ' ~ cpu_falling_interval,
+               'process cpu statistics limit entry-percentage ' ~ cpu_stats_entry_percentage
+                 ~ ' size ' ~ cpu_stats_size
+             ] }}
+      tags: [validate, always]
+
+    - name: VALIDATE - Check each line and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'snmpv3',
+               'check':    item,
+               'expected': 'present',
+               'actual':   'present' if item in snmp_lines else 'missing',
+               'result':   'PASS' if item in snmp_lines else 'FAIL'
+             }] }}
+      loop: "{{ snmp_checks }}"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    # A standard ACL prints a host without the word "host":
+    #   10 permit 10.1.1.50 log
+    #   20 deny any log
+    - name: VALIDATE - Check each SNMP_ACL entry and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'snmpv3',
+               'check':    'SNMP_ACL / ' ~ expected,
+               'expected': 'present',
+               'actual':   'present' if expected in snmp_acl_lines else 'missing',
+               'result':   'PASS' if expected in snmp_acl_lines else 'FAIL'
+             }] }}
+      vars:
+        expected: >-
+          {{ item.sequence ~ ' ' ~ item.grant ~ ' '
+             ~ ('any' if item.source.any is defined else item.source.host) ~ ' log' }}
+      loop: "{{ snmp_acl_entries }}"
+      loop_control:
+        label: "{{ item.sequence }}"
+      tags: [validate, always]
+
+    # Passwords are not checked - only the user, its group and its protocols.
+    - name: VALIDATE - Check the SNMPv3 user and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'snmpv3',
+               'check':    'snmp user ' ~ snmp_user_name ~ ' / ' ~ item,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: >-
+          {{ (snmp_user_block | length > 0)
+             if item == 'exists'
+             else (snmp_user_block is search('^\s*' ~ (item | regex_escape) ~ '\s*$', multiline=True)) }}
+      loop:
+        - exists
+        - "Group-name: {{ snmp_group_name }}"
+        - "Authentication Protocol: SHA"
+        - "Privacy Protocol: AES128"
+      loop_control:
+        label: "{{ item }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if snmp_failed | length == 0 else 'FAIL' }}
+          ---> snmpv3:
+          {{ snmp_all | length - snmp_failed | length }}
+          of {{ snmp_all | length }} present
+          {{ '' if snmp_failed | length == 0
+             else '- missing: ' + (snmp_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        snmp_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'snmpv3') | list }}
+        snmp_failed: >-
+          {{ snmp_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: snmp_failed | length > 0
+      tags: [validate, always]

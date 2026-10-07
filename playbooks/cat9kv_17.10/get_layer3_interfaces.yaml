@@ -1,0 +1,196 @@
+---
+# =============================================================================
+# get_l3_interfaces.yaml
+#
+#   ansible-playbook -i <inventory> get_l3_interfaces.yaml --ask-vault-pass
+#   ansible-playbook -i <inventory> get_l3_interfaces.yaml --limit access_switches --ask-vault-pass
+#
+# Read-only. Lists every Layer 3 interface - up or down, with or without an
+# IP address - and writes one CSV:
+#
+#   <playbook folder>/get_reports/<timestamp>/get_l3_interfaces.csv
+#
+#   hostname, mgmt_ip, interface, description, status, protocol, vrf,
+#   ip, mask, secondary_ip, secondary_mask
+#
+# WHAT COUNTS AS LAYER 3
+#   Every interface the switch lists, except switchports. So: SVIs (VlanX),
+#   loopbacks, tunnels, routed ports ("no switchport"), routed port-channels
+#   and the management port. A port is treated as a switchport only when
+#   "show interfaces switchport" says "Switchport: Enabled".
+#
+# HOW IT READS THE DEVICE (3 commands per device, all parsed with pyATS)
+#   show interfaces description   every interface, its status, protocol and
+#                                 description
+#   show interfaces switchport    which ports are Layer 2 (left out)
+#   show ip interface             VRF, and every IP with its prefix length
+#                                 and whether it is secondary
+#
+# COLUMNS
+#   status      up / down / admin down (shut down)
+#   protocol    up / down
+#   vrf         empty means the global routing table
+#   ip / mask   the primary address; mask in dotted form (/24 -> 255.255.255.0)
+#   secondary_  all secondary addresses, separated by "; " when there are
+#               several
+#   An interface with no IP has empty ip / mask columns. An unnumbered
+#   interface shows the borrowed IP with an empty mask; one still waiting for
+#   a DHCP address shows "DHCP - not assigned yet".
+#
+# A device that cannot be read still gets a row, marked "READ FAILED".
+# =============================================================================
+
+- name: Collect Layer 3 interface details
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # Prefix length -> dotted mask (index = prefix length).
+    l3_masks: ['0.0.0.0', '128.0.0.0', '192.0.0.0', '224.0.0.0', '240.0.0.0',
+               '248.0.0.0', '252.0.0.0', '254.0.0.0', '255.0.0.0',
+               '255.128.0.0', '255.192.0.0', '255.224.0.0', '255.240.0.0',
+               '255.248.0.0', '255.252.0.0', '255.254.0.0', '255.255.0.0',
+               '255.255.128.0', '255.255.192.0', '255.255.224.0', '255.255.240.0',
+               '255.255.248.0', '255.255.252.0', '255.255.254.0', '255.255.255.0',
+               '255.255.255.128', '255.255.255.192', '255.255.255.224',
+               '255.255.255.240', '255.255.255.248', '255.255.255.252',
+               '255.255.255.254', '255.255.255.255']
+
+  tasks:
+
+    - name: L3 - Read and parse show interfaces description with pyATS
+      ansible.utils.cli_parse:
+        command: show interfaces description
+        parser:
+          name: ansible.netcommon.pyats
+      register: l3_desc
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [l3, always]
+
+    - name: L3 - Read and parse show interfaces switchport with pyATS
+      ansible.utils.cli_parse:
+        command: show interfaces switchport
+        parser:
+          name: ansible.netcommon.pyats
+      register: l3_swport
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [l3, always]
+
+    - name: L3 - Read and parse show ip interface with pyATS
+      ansible.utils.cli_parse:
+        command: show ip interface
+        parser:
+          name: ansible.netcommon.pyats
+      register: l3_ip
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [l3, always]
+
+    - name: L3 - Start an empty list
+      set_fact:
+        l3_rows: []
+        l3_read_ok: "{{ l3_desc is not failed and l3_ip is not failed }}"
+      tags: [l3, always]
+
+    # One row per Layer 3 interface: every interface in "show interfaces
+    # description" that is not an enabled switchport.
+    - name: L3 - Build one row per Layer 3 interface
+      set_fact:
+        l3_rows: >-
+          {{ l3_rows + [{
+               'interface':      item.key,
+               'description':    item.value.description | default(''),
+               'status':         item.value.status | default(''),
+               'protocol':       item.value.protocol | default(''),
+               'vrf':            ipi.vrf | default('', true),
+               'ip':             (prim.ip | default('')) | replace('dhcp_negotiated', 'DHCP - not assigned yet'),
+               'mask':           l3_masks[prim.prefix_length | int] if prim.prefix_length is defined else '',
+               'secondary_ip':   sec | map(attribute='ip') | join('; '),
+               'secondary_mask': sec | map(attribute='prefix_length') | map('int')
+                                     | map('extract', l3_masks) | join('; ')
+             }] }}
+      vars:
+        ipi: "{{ (l3_ip.parsed | default({}))[item.key] | default({}) }}"
+        addrs: "{{ (ipi.ipv4 | default({}, true)).values() | list }}"
+        # pyATS only adds "secondary" to some addresses (not to DHCP-negotiated
+        # or some unnumbered ones), so a missing flag counts as primary.
+        sec: "{{ addrs | selectattr('secondary', 'defined') | selectattr('secondary', 'equalto', true) | list }}"
+        prim: "{{ addrs | reject('in', sec) | first | default({}) }}"
+      loop: "{{ (l3_desc.parsed.interfaces | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        not (((l3_swport.parsed | default({}))[item.key] | default({})).switchport_enable
+             | default(false))
+      tags: [l3, always]
+
+    - name: L3 - Show the result
+      debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ l3_rows | length }} Layer 3 interfaces,
+          {{ l3_rows | rejectattr('ip', 'equalto', '') | list | length }} with an IP address,
+          {{ l3_rows | selectattr('status', 'equalto', 'up') | list | length }} up
+          {{ '' if l3_read_ok | bool else '- READ FAILED' }}
+      changed_when: not (l3_read_ok | bool)
+      tags: [l3, always]
+
+    # Runs once, on the control node, after every device has been read.
+    - name: L3 - Create the report folder
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/get_reports/{{ l3_stamp }}"
+        state: directory
+        mode: "0755"
+      vars:
+        l3_stamp: "{{ now(fmt='%Y-%m-%d_%H%M%S') }}"
+      register: l3_dir
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+      tags: [l3, always]
+
+    # Every field is quoted, so descriptions containing commas stay in one
+    # column. Opens directly in Excel.
+    - name: L3 - Write the CSV
+      ansible.builtin.copy:
+        dest: "{{ l3_dir.path }}/get_l3_interfaces.csv"
+        mode: "0644"
+        content: |
+          {% set cols = ['interface', 'description', 'status', 'protocol', 'vrf', 'ip', 'mask', 'secondary_ip', 'secondary_mask'] %}
+          {{ (['hostname', 'mgmt_ip'] + cols) | join(',') }}
+          {% for h in ansible_play_hosts_all %}
+          {%   set hv = hostvars[h] %}
+          {%   set ip = hv.ansible_host | default('') %}
+          {%   if not (hv.l3_read_ok | default(false) | bool) %}
+          "{{ [h, ip, 'READ FAILED'] | map('string') | join('","') }}"
+          {%   else %}
+          {%     for r in hv.l3_rows %}
+          {%       set ns = namespace(row=[h, ip]) %}
+          {%       for c in cols %}
+          {%         set ns.row = ns.row + [r[c] | default('')] %}
+          {%       endfor %}
+          "{{ ns.row | map('string') | map('replace', '"', '""') | join('","') }}"
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+      tags: [l3, always]
+
+    - name: L3 - Show where the report was written
+      debug:
+        msg: "Layer 3 interfaces written to {{ l3_dir.path }}/get_l3_interfaces.csv"
+      run_once: true
+      tags: [l3, always]

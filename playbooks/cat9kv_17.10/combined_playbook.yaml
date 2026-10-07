@@ -1,0 +1,24 @@
+# playbooks are executed one after another in sequence, make sure the sequence is correct
+
+    -  import_playbook: gather.yaml
+    -  import_playbook: deploy_ntp.yaml
+#   -  import_playbook: deploy_management_hardening.yaml
+#   -  import_playbook: deploy_logging.yaml
+#   -  import_playbook: deploy_local_credentials.yaml
+#   -  import_playbook: deploy_local_aaa.yaml
+#   -  import_playbook: deploy_interface_templates_no_dot1x.yaml
+#   -  import_playbook: deploy_globalconfig.yaml
+#   -  import_playbook: deploy_dns_domain_name.yaml
+#   -  import_playbook: deploy_hostname.yaml
+#   -  import_playbook: deploy_dhcp_snooping.yaml
+#   -  import_playbook: deploy_config_archive.yaml
+#   -  import_playbook: deploy_svi.yaml
+#   -  import_playbook: deploy_banners.yaml
+#   -  import_playbook: deploy_radius_ibns2.0_cli.yaml
+#   -  import_playbook: deploy_radius_ibns2.0_netconf.yaml
+#   -  import_playbook: deploy_vlans.yaml
+#   -  import_playbook: deploy_vtp.yaml
+#   -  import_playbook: deploy_tacacs.yaml
+#   -  import_playbook: deploy_snmpv3.yaml
+#   -  import_playbook: device_tracking.yaml
+    -  import_playbook: report.yaml

@@ -1,0 +1,133 @@
+# =============================================================================
+# get_inventory.yaml
+#
+#   ansible-playbook -i <inventory> get_inventory.yaml --ask-vault-pass
+#   ansible-playbook -i <inventory> get_inventory.yaml --limit access_switches --ask-vault-pass
+#
+# Read-only. Collects the hardware inventory and serial numbers of every
+# device and writes one CSV for the whole run:
+#
+#   <playbook folder>/get_reports/<timestamp>/get_inventory.csv
+#
+#   hostname, mgmt_ip, model, version, chassis_sn, item_name, description, pid, vid, sn
+#
+# One row per item in "show inventory": chassis/stack members, supervisor,
+# power supplies, fans, uplink modules and SFPs.
+#
+# HOW IT READS THE DEVICE
+#   show version    parsed with pyATS/Genie (ansible.utils.cli_parse) for the
+#                   hostname, model, software version and chassis serial.
+#   show inventory  read with ios_command and split with a regex instead of
+#                   Genie. The Genie "show inventory" parser keys items by
+#                   PID, so two identical parts (e.g. two PWR-C1-715WAC power
+#                   supplies) overwrite each other, and some items (the stack
+#                   entry, SFPs) are left out. The regex keeps every
+#                   NAME/DESCR/PID/VID/SN entry exactly as the device prints it.
+#
+# A device that cannot be read still gets a row, marked "READ FAILED".
+# =============================================================================
+
+- name: Collect hardware inventory and serial numbers
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    - name: INVENTORY - Read and parse show version with pyATS
+      ansible.utils.cli_parse:
+        command: show version
+        parser:
+          name: ansible.netcommon.pyats
+      register: inv_showver
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [inventory, always]
+
+    - name: INVENTORY - Read show inventory
+      cisco.ios.ios_command:
+        commands:
+          - show inventory
+      register: inv_raw
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [inventory, always]
+
+    # Each entry in "show inventory" looks like:
+    #   NAME: "Switch 1 - Power Supply A", DESCR: "Switch 1 - Power Supply A"
+    #   PID: PWR-C1-715WAC     , VID: V02  , SN: ART2215F0XX
+    # regex_findall returns one [name, descr, pid, vid, sn] list per entry.
+    - name: INVENTORY - Split the inventory into items
+      set_fact:
+        inv_device:
+          hostname: "{{ inv_showver.parsed.version.hostname | default(inventory_hostname) }}"
+          mgmt_ip: "{{ ansible_host | default('') }}"
+          model: "{{ inv_showver.parsed.version.chassis | default('') }}"
+          version: "{{ inv_showver.parsed.version.version | default('') }}"
+          chassis_sn: "{{ inv_showver.parsed.version.chassis_sn | default('') }}"
+          read_ok: "{{ inv_raw is not failed }}"
+        inv_items: >-
+          {{ (inv_raw.stdout[0] | default(''))
+             | regex_findall('NAME:\s*"([^"]*)",\s*DESCR:\s*"([^"]*)"\s*[\r\n]+\s*PID:\s*([^,]*?)\s*,\s*VID:\s*([^,]*?)\s*,\s*SN:\s*(\S*)') }}
+      tags: [inventory, always]
+
+    - name: INVENTORY - Show the result
+      debug:
+        msg: >-
+          {{ inv_device.hostname }} ({{ inv_device.model }}, {{ inv_device.version }},
+          chassis SN {{ inv_device.chassis_sn }}):
+          {{ inv_items | length }} items
+          {{ '' if inv_device.read_ok | bool else '- READ FAILED' }}
+      changed_when: not (inv_device.read_ok | bool)
+      tags: [inventory, always]
+
+    # Runs once, on the control node, after every device has been read.
+    - name: INVENTORY - Create the report folder
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/get_reports/{{ inv_stamp }}"
+        state: directory
+        mode: "0755"
+      vars:
+        inv_stamp: "{{ now(fmt='%Y-%m-%d_%H%M%S') }}"
+      register: inv_dir
+      run_once: true
+      delegate_to: localhost
+      tags: [inventory, always]
+      changed_when: false
+
+    # Every field is quoted, so descriptions containing commas stay in one
+    # column. Opens directly in Excel.
+    - name: INVENTORY - Write the CSV
+      ansible.builtin.copy:
+        dest: "{{ inv_dir.path }}/get_inventory.csv"
+        mode: "0644"
+        content: |
+          hostname,mgmt_ip,model,version,chassis_sn,item_name,description,pid,vid,sn
+          {% for h in ansible_play_hosts_all %}
+          {%   set d = hostvars[h].inv_device | default({'hostname': h, 'read_ok': false}) %}
+          {%   set base = [d.hostname, d.mgmt_ip | default(''), d.model | default(''), d.version | default(''), d.chassis_sn | default('')] %}
+          {%   set items = hostvars[h].inv_items | default([]) %}
+          {%   if not (d.read_ok | bool) or items | length == 0 %}
+          "{{ (base + ['READ FAILED', '', '', '', '']) | map('string') | map('replace', '"', '""') | join('","') }}"
+          {%   else %}
+          {%     for i in items %}
+          "{{ (base + i) | map('string') | map('replace', '"', '""') | join('","') }}"
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+      run_once: true
+      delegate_to: localhost
+      tags: [inventory, always]
+      changed_when: false
+
+    - name: INVENTORY - Show where the report was written
+      debug:
+        msg: "Inventory written to {{ inv_dir.path }}/get_inventory.csv"
+      run_once: true
+      tags: [inventory, always]
+      changed_when: false

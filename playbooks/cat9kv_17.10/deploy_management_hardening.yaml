@@ -2,8 +2,9 @@
 # =============================================================================
 # deploy_management_hardening.yaml
 #
-#   ansible-playbook deploy_management_hardening.yaml                 -> validate only
-#   ansible-playbook deploy_management_hardening.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
 # Management hardening: management and HTTP ACLs, HTTP server, SSH.
 # NETCONF where the YANG model supports it, CLI where it does not.

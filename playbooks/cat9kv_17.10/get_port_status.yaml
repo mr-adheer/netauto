@@ -1,0 +1,108 @@
+---
+# =============================================================================
+# get_port_status.yaml
+#
+#   ansible-playbook -i <inventory> get_port_status.yaml --ask-vault-pass
+#   ansible-playbook -i <inventory> get_port_status.yaml --limit access_switches --ask-vault-pass
+#
+# Read-only. "show interfaces status" from every device, parsed with
+# pyATS/Genie, written to one CSV:
+#
+#   <playbook folder>/get_reports/<timestamp>/get_port_status.csv
+#
+#   hostname, mgmt_ip, port, name, status, vlan, duplex_code, port_speed, type
+#   (+ any extra field the parser returns on another platform or version)
+#
+# One row per port. The column names are the pyATS field names.
+# Genie writes port names in full (Gi1/0/1 -> GigabitEthernet1/0/1).
+# hostname is the device name in the Ansible inventory.
+#
+# A device that cannot be read still gets a row, marked "READ FAILED".
+# =============================================================================
+
+- name: Collect show interfaces status
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    - name: PORTS - Read and parse show interfaces status with pyATS
+      ansible.utils.cli_parse:
+        command: show interfaces status
+        parser:
+          name: ansible.netcommon.pyats
+      register: port_status
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [ports, always]
+
+    - name: PORTS - Show the result
+      debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ (port_status.parsed.interfaces | default({})) | length }} ports
+          {{ '- READ FAILED' if port_status is failed else '' }}
+      changed_when: port_status is failed
+      tags: [ports, always]
+
+    # Runs once, on the control node, after every device has been read.
+    - name: PORTS - Create the report folder
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/get_reports/{{ port_stamp }}"
+        state: directory
+        mode: "0755"
+      vars:
+        port_stamp: "{{ now(fmt='%Y-%m-%d_%H%M%S') }}"
+      register: port_dir
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+      tags: [ports, always]
+
+    # Columns: the usual "show interfaces status" fields first, in a fixed
+    # order, then any other field the parser returns on this platform or
+    # version (added at the end, sorted). Every field is quoted, so names
+    # containing commas stay in one column. Opens directly in Excel.
+    - name: PORTS - Write the CSV
+      ansible.builtin.copy:
+        dest: "{{ port_dir.path }}/get_port_status.csv"
+        mode: "0644"
+        content: |
+          {% set known = ['name', 'status', 'vlan', 'duplex_code', 'port_speed', 'type'] %}
+          {% set ns = namespace(found=[]) %}
+          {% for h in ansible_play_hosts_all %}
+          {%   for p, s in ((hostvars[h].port_status | default({})).parsed.interfaces | default({})).items() %}
+          {%     set ns.found = ns.found + (s.keys() | list) %}
+          {%   endfor %}
+          {% endfor %}
+          {% set cols = known + (ns.found | unique | reject('in', known) | sort) %}
+          {{ (['hostname', 'mgmt_ip', 'port'] + cols) | join(',') }}
+          {% for h in ansible_play_hosts_all %}
+          {%   set hv = hostvars[h] %}
+          {%   set ip = hv.ansible_host | default('') %}
+          {%   set ports = (hv.port_status | default({})).parsed.interfaces | default({}) %}
+          {%   if ports | length == 0 %}
+          "{{ [h, ip, 'READ FAILED'] | map('string') | join('","') }}"
+          {%   else %}
+          {%     for p, s in ports.items() %}
+          {%       set ns2 = namespace(row=[h, ip, p]) %}
+          {%       for c in cols %}
+          {%         set ns2.row = ns2.row + [s[c] | default('')] %}
+          {%       endfor %}
+          "{{ ns2.row | map('string') | map('replace', '"', '""') | join('","') }}"
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+      tags: [ports, always]
+
+    - name: PORTS - Show where the report was written
+      debug:
+        msg: "Port status written to {{ port_dir.path }}/get_port_status.csv"
+      run_once: true
+      tags: [ports, always]

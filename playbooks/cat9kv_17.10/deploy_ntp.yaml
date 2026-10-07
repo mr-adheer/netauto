@@ -2,8 +2,9 @@
 # =============================================================================
 # deploy_ntp.yaml
 #
-#   ansible-playbook deploy_ntp.yaml                 -> validate only
-#   ansible-playbook deploy_ntp.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
 # NTP, authenticated or unauthenticated, decided by:
 #   ntp_authentication_enabled: true | false
@@ -202,8 +203,8 @@
       register: ntp_read
       until: >-
         ntp_deploy is not defined
-        or 'ntp access-group peer NTP_ACL' in ntp_read.stdout[0]
-      retries: 3
+        or 'ntp access-group ipv4 peer NTP_ACL' in ntp_read.stdout[0]
+      retries: 5
       delay: 10
       ignore_errors: true
       changed_when: false
@@ -221,7 +222,7 @@
         ntp_checks: >-
           {{ [
                {'mode': 'exact', 'line': 'ntp source ' ~ ntp_source_interface_type ~ ntp_source_interface_number},
-               {'mode': 'exact', 'line': 'ntp access-group peer NTP_ACL'}
+               {'mode': 'exact', 'line': 'ntp access-group ipv4 peer NTP_ACL'}
              ]
              + ([
                   {'mode': 'exact',  'line': 'ntp authenticate'},

@@ -2,25 +2,31 @@
 # =============================================================================
 # deploy_globalconfig.yaml
 #
-#   ansible-playbook deploy_globalconfig.yaml                 -> validate only
-#   ansible-playbook deploy_globalconfig.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
-# NETCONF where the YANG model supports it, CLI where it does not.
-# The two original plays are merged into one; each task carries its own
-# connection settings.
+# Global settings. NETCONF where the YANG model supports it, CLI where it
+# does not.
 #
-# CLI fallback required for:
-#   no ip finger, no service config, no service pad,
-#   no service tcp-small-servers, no service udp-small-servers,
-#   no ip source-route, no service internal, no ntp allow mode control,
-#   ip options drop, mac address-table aging-time,
-#   ip icmp rate-limit unreachable, memory reserve critical
+# The service lines come from group_vars/all/global_configs.yaml, and the
+# SAME lists drive both deploy and validation, so the two cannot drift apart:
+#   global_enabled_services                 deployed and validated
+#   global_disabled_services                deployed and validated
+#   global_disabled_services_unverifiable   deployed only - never printed in
+#                                           "show running-config all" on
+#                                           Catalyst 9000, so not validated
+# A group (e.g. core_switches) can override a list, for example to keep
+# "service dhcp" on where SVIs use ip helper-address (DHCP relay).
 #
-# NOT VALIDATED - accepted by the parser but never appear in
-# "show running-config all" on Catalyst 9000:
-#   no service tcp-small-servers
-#   no service udp-small-servers
-#   no ntp allow mode control
+# NETCONF tasks use error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The first CLI task after the NETCONF tasks
+#   retries (3 x 10 seconds), and the validation read retries too, but only
+#   when a deploy ran in this run.
 #
 # NOTE: get_filter is required on every NETCONF task. See Cisco bug
 # CSCwk31014.
@@ -35,58 +41,7 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Configure service settings
-      ansible.netcommon.netconf_config:
-        content: |
-          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <service>
-                <password-encryption/>
-                <timestamps>
-                  <debug-config>
-                    <datetime>
-                      <msec/>
-                      <localtime/>
-                      <show-timezone/>
-                    </datetime>
-                  </debug-config>
-                  <log-config>
-                    <datetime>
-                      <msec/>
-                      <localtime/>
-                      <show-timezone/>
-                    </datetime>
-                  </log-config>
-                </timestamps>
-                <call-home/>
-                <compress-config/>
-                <counters>
-                  <max>
-                    <age>5</age>
-                  </max>
-                </counters>
-                <dhcp-config>false</dhcp-config>
-                <nagle/>
-                <sequence-numbers/>
-                <tcp-keepalives-in/>
-                <tcp-keepalives-out/>
-              </service>
-            </native>
-          </config>
-        get_filter: |
-          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-              <service/>
-            </native>
-          </filter>
-        target: candidate
-        commit: true
-      vars:
-        ansible_connection: netconf
-        ansible_port: 830
-      tags: [deploy, never]
-
-    - name: Configure memory low watermark
+    - name: DEPLOY - Configure the memory low watermark
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -108,12 +63,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
       vars:
         ansible_connection: netconf
         ansible_port: 830
       tags: [deploy, never]
 
-    - name: Configure the clock timezone
+    - name: DEPLOY - Configure the clock timezone
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -135,12 +91,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
       vars:
         ansible_connection: netconf
         ansible_port: 830
       tags: [deploy, never]
 
-    - name: Configure TCP synwait time
+    - name: DEPLOY - Configure the TCP synwait time
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -162,12 +119,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
       vars:
         ansible_connection: netconf
         ansible_port: 830
       tags: [deploy, never]
 
-    - name: Enable software auto-upgrade
+    - name: DEPLOY - Enable software auto-upgrade
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -187,12 +145,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
       vars:
         ansible_connection: netconf
         ansible_port: 830
       tags: [deploy, never]
 
-    - name: Configure the boot system image
+    - name: DEPLOY - Configure the boot system image
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -220,29 +179,37 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: glob_deploy
       vars:
         ansible_connection: netconf
         ansible_port: 830
       tags: [deploy, never]
 
-    # --- CLI fallback ---------------------------------------------------
-    - name: Disable unused services
+    # --- CLI ---------------------------------------------------------------
+    # First CLI task after the NETCONF commits: retries while the switch
+    # finishes applying them.
+    - name: DEPLOY - Enable the required services
       cisco.ios.ios_config:
-        lines:
-          - no ip finger
-          - no service config
-          - no service pad
-          - no service tcp-small-servers
-          - no service udp-small-servers
-          - no service internal
-          - no ip source-route
-          - no ntp allow mode control
+        lines: "{{ global_enabled_services }}"
+      register: glob_cli_enable
+      until: glob_cli_enable is not failed
+      retries: 3
+      delay: 10
       vars:
         ansible_connection: network_cli
         ansible_port: 22
       tags: [deploy, never]
 
-    - name: Configure IP hardening and limits
+    - name: DEPLOY - Disable unused services
+      cisco.ios.ios_config:
+        lines: "{{ global_disabled_services + global_disabled_services_unverifiable }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure IP hardening and limits
       cisco.ios.ios_config:
         lines:
           - ip options drop
@@ -253,7 +220,7 @@
         ansible_port: 22
       tags: [deploy, never]
 
-    - name: Configure remaining memory settings
+    - name: DEPLOY - Configure the memory reserve
       cisco.ios.ios_config:
         lines:
           - "memory reserve critical {{ memory_reserved_critical }}"
@@ -265,56 +232,51 @@
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read the global configuration
+    # Retries only when a deploy ran in this run (glob_deploy is defined).
+    - name: VALIDATE - Read the global configuration back, retries after deploy
       cisco.ios.ios_command:
         commands:
           - show running-config all | include ^service|^no service|^ip |^no ip |^memory |^clock timezone|^software |^boot system|^mac address-table aging
       register: glob_read
+      until: >-
+        glob_deploy is not defined
+        or (glob_read is not failed
+            and ('boot system' in (glob_read.stdout[0] | default(''))))
+      retries: 3
+      delay: 10
+      ignore_errors: true
       vars:
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
       tags: [validate, always]
 
-    - name: Store the output as trimmed lines
+    - name: VALIDATE - Store the output as trimmed lines
       set_fact:
-        glob_lines: "{{ glob_read.stdout_lines[0] | map('trim') | list }}"
+        glob_lines: "{{ (glob_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
       tags: [validate, always]
 
-    - name: Define what should be present
+    # The service lists come from group_vars; the rest are built from the
+    # same variables the deploy tasks use.
+    # "mac address-table aging-time" is deployed but not checked.
+    - name: VALIDATE - Define the expected lines
       set_fact:
-        glob_checks:
-          # service block
-          - "service password-encryption"
-          - "service timestamps debug datetime msec localtime show-timezone"
-          - "service timestamps log datetime msec localtime show-timezone"
-          - "service call-home"
-          - "service compress-config"
-          - "service counters max age 5"
-          - "service nagle"
-          - "service sequence-numbers"
-          - "service tcp-keepalives-in"
-          - "service tcp-keepalives-out"
-          - "no service dhcp"
-          # CLI hardening
-          - "no ip finger"
-          - "no service config"
-          - "no service pad"
-          - "no service internal"
-          - "no ip source-route"
-          - "ip options drop"
-          # values from group_vars
-          - "memory free low-watermark processor {{ memory_low_watermark_processor }}"
-          - "memory reserve critical {{ memory_reserved_critical }}"
-          - "clock timezone {{ timezone_name }} {{ timezone_hours }} {{ timezone_minutes }}"
-          - "ip tcp synwait-time {{ tcp_synwait_time }}"
-          - "ip icmp rate-limit unreachable {{ icmp_unreachable_rate_limit }}"
-          #- "mac address-table aging-time {{ mac_aging_time }}"
-          - "software auto-upgrade enable"
-          - "boot system switch all {{ boot_system_image }}"
+        glob_checks: >-
+          {{ global_enabled_services
+             + global_disabled_services
+             + [
+                 'ip options drop',
+                 'memory free low-watermark processor ' ~ memory_low_watermark_processor,
+                 'memory reserve critical ' ~ memory_reserved_critical,
+                 'clock timezone ' ~ timezone_name ~ ' ' ~ timezone_hours ~ ' ' ~ timezone_minutes,
+                 'ip tcp synwait-time ' ~ tcp_synwait_time,
+                 'ip icmp rate-limit unreachable ' ~ icmp_unreachable_rate_limit,
+                 'software auto-upgrade enable',
+                 'boot system switch all ' ~ boot_system_image
+               ] }}
       tags: [validate, always]
 
-    - name: Evaluate the checks
+    - name: VALIDATE - Check each line and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
@@ -329,19 +291,20 @@
         label: "{{ item }}"
       tags: [validate, always]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if glob_failed | length == 0 else 'FAIL' }}
           ---> global config:
-          {{ glob_checks | length - glob_failed | length }}
-          of {{ glob_checks | length }} present
+          {{ glob_all | length - glob_failed | length }}
+          of {{ glob_all | length }} present
           {{ '' if glob_failed | length == 0
              else '- missing: ' + (glob_failed | map(attribute='check') | join('; ')) }}
       vars:
-        glob_failed: >-
+        glob_all: >-
           {{ validation_results
-             | selectattr('feature', 'equalto', 'global config')
-             | selectattr('result', 'equalto', 'FAIL') | list }}
+             | selectattr('feature', 'equalto', 'global config') | list }}
+        glob_failed: >-
+          {{ glob_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: glob_failed | length > 0
       tags: [validate, always]

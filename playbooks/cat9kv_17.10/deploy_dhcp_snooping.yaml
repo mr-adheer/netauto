@@ -2,8 +2,9 @@
 # =============================================================================
 # deploy_dhcp_snooping.yaml
 #
-#   ansible-playbook deploy_dhcp_snooping.yaml                 -> validate only
-#   ansible-playbook deploy_dhcp_snooping.yaml --tags deploy   -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #
 # Fully supported by the YANG model, so no CLI fallback is needed for the
 # deployment. Validation reads over CLI because "show running-config all"
@@ -13,6 +14,12 @@
 #   <snooping/>       the empty element that enables the feature
 #                     ("ip dhcp snooping")
 #   <snooping-conf>   the settings - option and vlan-list
+#
+# NETCONF uses error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# After a deploy in the same run, the validation read retries (3 x 10
+# seconds), because IOS-XE applies a NETCONF commit in the background.
 #
 # NOTE: get_filter is required on every NETCONF task. See Cisco bug
 # CSCwk31014.
@@ -27,7 +34,7 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Configure DHCP snooping
+    - name: DEPLOY - Configure DHCP snooping
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -59,47 +66,50 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: snoop_deploy
       vars:
         ansible_connection: netconf
         ansible_port: 830
-      tags:
-        - deploy
-        - never
+      tags: [deploy, never]
 
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read the DHCP snooping configuration
+    # Retries only when a deploy ran in this run (snoop_deploy is defined).
+    - name: VALIDATE - Read the DHCP snooping configuration back, retries after deploy
       cisco.ios.ios_command:
         commands:
-          - show running-config all | include ^ip dhcp snooping
+          - show running-config all | include ^ip dhcp snooping|^no ip dhcp snooping
       register: snoop_read
+      until: >-
+        snoop_deploy is not defined
+        or (snoop_read is not failed
+            and ('ip dhcp snooping vlan ' ~ dhcp_snooping_vlans)
+                in (snoop_read.stdout[0] | default('')))
+      retries: 3
+      delay: 10
+      ignore_errors: true
       vars:
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Store the output as trimmed lines
+    - name: VALIDATE - Store the output as trimmed lines
       set_fact:
-        snoop_lines: "{{ snoop_read.stdout_lines[0] | map('trim') | list }}"
-      tags:
-        - validate
-        - always
+        snoop_lines: "{{ (snoop_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
+      tags: [validate, always]
 
-    - name: Define what should be present
+    - name: VALIDATE - Define the expected lines
       set_fact:
         snoop_checks:
           - "ip dhcp snooping"
           - "ip dhcp snooping vlan {{ dhcp_snooping_vlans }}"
           - "no ip dhcp snooping information option"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Evaluate the checks
+    - name: VALIDATE - Check each line and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
@@ -112,25 +122,22 @@
       loop: "{{ snoop_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags:
-        - validate
-        - always
+      tags: [validate, always]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if snoop_failed | length == 0 else 'FAIL' }}
           ---> dhcp snooping:
-          {{ snoop_checks | length - snoop_failed | length }}
-          of {{ snoop_checks | length }} present
+          {{ snoop_all | length - snoop_failed | length }}
+          of {{ snoop_all | length }} present
           {{ '' if snoop_failed | length == 0
              else '- missing: ' + (snoop_failed | map(attribute='check') | join('; ')) }}
       vars:
-        snoop_failed: >-
+        snoop_all: >-
           {{ validation_results
-             | selectattr('feature', 'equalto', 'dhcp snooping')
-             | selectattr('result', 'equalto', 'FAIL') | list }}
+             | selectattr('feature', 'equalto', 'dhcp snooping') | list }}
+        snoop_failed: >-
+          {{ snoop_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: snoop_failed | length > 0
-      tags:
-        - validate
-        - always
+      tags: [validate, always]

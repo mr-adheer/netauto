@@ -1,39 +1,70 @@
 ---
-# =============================================================
-# TACACS+ - NETCONF where supported, CLI where not
+# =============================================================================
+# deploy_tacacs.yaml
 #
-# Structure verified against a real device dump
-# (show running-config | format netconf-xml).
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# TACACS+ - NETCONF where supported, CLI where not. Structure verified
+# against a real device dump (show running-config | format netconf-xml).
 #
 # CLI fallback required for:
-#   - single-connection              (no element under <tacacs><server>)
+#   - single-connection               (no element under <tacacs><server>)
 #   - aaa authentication fail-message (no element)
+#   - aaa accounting exec / commands  (configured last, see below)
 #
 # WARNING: THIS PLAYBOOK CHANGES HOW YOU LOG IN.
-# It points vty authentication, authorization and accounting at
-# TACACS. If the TACACS servers are unreachable, every command
-# will stall waiting for them to time out, and a mistake here
-# can lock you out of the device.
+# It points VTY authentication, authorization and accounting at TACACS. If
+# the TACACS servers are unreachable, every command stalls waiting for them
+# to time out, and a mistake here can lock you out of the device.
+# Keep a console session open for the first deploy.
 #
-# Test with commit: false first, and keep a console session open.
+# Variables (group_vars):
+#   tacacs_servers                    list of {ip, timeout}
+#   tacacs_server_prefix              e.g. "TACACS_" -> tacacs server TACACS_10.1.1.1
+#   tacacs_shared_key                 (vault)
+#   tacacs_source_interface_type      e.g. "Vlan"
+#   tacacs_source_interface_number    e.g. "100"
+#   tacacs_group_name                 e.g. TACACS_GRP
+#   tacacs_authen_list / tacacs_author_list / tacacs_cmds_list
 #
-# NOTE: get_filter is required on every NETCONF task.
-# See Cisco bug CSCwk31014.
-# =============================================================
+# OVERLAP WITH deploy_local_aaa.yaml
+#   Both playbooks set "aaa login success-track-conf-time" (0 there, 1 here),
+#   the fail-message, the default method lists and the VTY lines. Whichever
+#   runs last wins. This playbook therefore only VALIDATES the TACACS-specific
+#   lines; the shared ones are checked by deploy_local_aaa.yaml. Decide which
+#   value of success-track-conf-time you want and set it in one place.
+#
+# NETCONF tasks use error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The first CLI task after the NETCONF tasks
+#   retries (3 x 10 seconds), and the validation read retries too, but only
+#   when a deploy ran in this run.
+#
+# VALIDATION
+#   Never run on a switch yet. On the first lab run, compare any FAIL with
+#   "show running-config all" and correct the check if the switch simply
+#   prints the line differently. Keys are never validated - only that each
+#   server has one. The read output contains keys, so it uses no_log.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
 
-# -------------------------------------------------------------
-# PLAY 1 - NETCONF
-# -------------------------------------------------------------
-- name: Configure TACACS+ (NETCONF)
+- name: Configure and validate TACACS+
   hosts: all
   gather_facts: false
-  vars:
-    ansible_connection: netconf
-    ansible_port: 830
 
   tasks:
 
-    - name: Configure TACACS servers
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure the TACACS servers
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -63,9 +94,15 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      register: tacacs_deploy
       no_log: true
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure the TACACS source interface
+    - name: DEPLOY - Configure the TACACS source interface
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -89,8 +126,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure the TACACS server group
+    - name: DEPLOY - Configure the TACACS server group
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -123,8 +165,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure AAA method lists
+    - name: DEPLOY - Configure the AAA method lists for TACACS
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -223,8 +270,13 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-    - name: Configure VTY lines for TACACS
+    - name: DEPLOY - Configure the VTY lines for TACACS
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -286,41 +338,199 @@
           </filter>
         target: candidate
         commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
 
-# -------------------------------------------------------------
-# PLAY 2 - CLI fallback
-# -------------------------------------------------------------
-- name: Configure TACACS items not in the YANG model (CLI)
-  hosts: all
-  gather_facts: false
-  vars:
-    ansible_connection: network_cli
-    ansible_port: 22
-
-  tasks:
-
+    # --- CLI ---------------------------------------------------------------
     # single-connection has no element under <tacacs><server>.
-    - name: Enable single-connection on the TACACS servers
+    # First CLI task after the NETCONF commits: retries while the switch
+    # finishes applying them.
+    - name: DEPLOY - Enable single-connection on the TACACS servers
       cisco.ios.ios_config:
         lines:
           - single-connection
         parents: "tacacs server {{ tacacs_server_prefix }}{{ item.ip }}"
+      register: tacacs_cli_first
+      until: tacacs_cli_first is not failed
+      retries: 3
+      delay: 10
       loop: "{{ tacacs_servers }}"
       loop_control:
         label: "{{ item.ip }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
 
-    # No YANG element for the AAA fail-message.
-    - name: Configure the AAA fail-message
+    # No YANG element for the AAA fail-message. Checked by deploy_local_aaa.yaml.
+    - name: DEPLOY - Configure the AAA fail-message
       cisco.ios.ios_config:
         lines:
           - aaa authentication fail-message  * LOGIN FAILED *
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
 
-    # Accounting to TACACS is configured last, deliberately - if
-    # the servers are unreachable, these settings make every
-    # command slow. Verify TACACS reachability before running.
-    - name: Configure TACACS accounting
+    # Accounting to TACACS is configured last, deliberately - if the servers
+    # are unreachable, these settings make every command slow. Verify TACACS
+    # reachability before running.
+    - name: DEPLOY - Configure TACACS accounting
       cisco.ios.ios_config:
         lines:
           - "aaa accounting exec default start-stop group {{ tacacs_group_name }}"
           - "aaa accounting commands 7 default start-stop group {{ tacacs_group_name }}"
           - "aaa accounting commands 15 default start-stop group {{ tacacs_group_name }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # One read per area, plus one per TACACS server. read_keys and read_cmds
+    # are in the same order, so each output is stored under its key.
+    # VTY lines may print as "line vty 0 4" and "line vty 5 15", so all VTY
+    # sections are read together.
+    - name: VALIDATE - Build the list of reads
+      set_fact:
+        tac_read_keys: >-
+          {{ ['global', 'group', 'vty']
+             + (tacacs_servers | map(attribute='ip')
+                | map('regex_replace', '^(.*)$', 'server \1') | list) }}
+        tac_read_cmds: >-
+          {{ ['show running-config all | include ^aaa |^ip tacacs source-interface',
+              'show running-config all | section ^aaa group server tacacs\+ ' ~ tacacs_group_name ~ '$',
+              'show running-config all | section ^line vty']
+             + (tacacs_servers | map(attribute='ip')
+                | map('regex_replace', '^(.*)$', 'show running-config all | section ^tacacs server ' ~ tacacs_server_prefix ~ '\1$')
+                | list) }}
+      tags: [validate, always]
+
+    # Retries only when a deploy ran in this run (tacacs_deploy is defined),
+    # until every read returns something.
+    - name: VALIDATE - Read the TACACS configuration back, retries after deploy
+      cisco.ios.ios_command:
+        commands: "{{ tac_read_cmds }}"
+      register: tac_read
+      until: >-
+        tacacs_deploy is not defined
+        or (tac_read is not failed
+            and (tac_read.stdout | default([]) | select | list | length) == (tac_read_cmds | length))
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      no_log: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, always]
+
+    - name: VALIDATE - Store each read as trimmed lines
+      set_fact:
+        tac_lines: >-
+          {{ tac_lines | default({}) | combine({ item.0:
+               item.1 | map('trim') | map('regex_replace', '\s+', ' ') | list }) }}
+      loop: "{{ tac_read_keys | zip(tac_read.stdout_lines | default([])) | list }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      no_log: true
+      tags: [validate, always]
+
+    # Only the TACACS-specific lines. The default method lists, fail-message
+    # and the rest of the VTY settings are checked by deploy_local_aaa.yaml.
+    - name: VALIDATE - Define the expected lines
+      set_fact:
+        tac_checks:
+          - { where: global, line: "aaa authentication login {{ tacacs_authen_list }} group {{ tacacs_group_name }} local" }
+          - { where: global, line: "aaa authentication enable default group {{ tacacs_group_name }} enable" }
+          - { where: global, line: "aaa authorization exec {{ tacacs_author_list }} group {{ tacacs_group_name }} local if-authenticated" }
+          - { where: global, line: "aaa authorization commands 7 {{ tacacs_cmds_list }} group {{ tacacs_group_name }} local if-authenticated" }
+          - { where: global, line: "aaa authorization commands 15 {{ tacacs_cmds_list }} group {{ tacacs_group_name }} local if-authenticated" }
+          - { where: global, line: "aaa accounting exec default start-stop group {{ tacacs_group_name }}" }
+          - { where: global, line: "aaa accounting commands 7 default start-stop group {{ tacacs_group_name }}" }
+          - { where: global, line: "aaa accounting commands 15 default start-stop group {{ tacacs_group_name }}" }
+          - { where: global, line: "ip tacacs source-interface {{ tacacs_source_interface_type }}{{ tacacs_source_interface_number }}" }
+          - { where: group,  line: "aaa group server tacacs+ {{ tacacs_group_name }}" }
+          - { where: vty,    line: "login authentication {{ tacacs_authen_list }}" }
+          - { where: vty,    line: "authorization exec {{ tacacs_author_list }}" }
+          - { where: vty,    line: "authorization commands 7 {{ tacacs_cmds_list }}" }
+          - { where: vty,    line: "authorization commands 15 {{ tacacs_cmds_list }}" }
+      tags: [validate, always]
+
+    - name: VALIDATE - Check each line and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'tacacs',
+               'check':    item.where ~ ' / ' ~ item.line,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: "{{ item.line in ((tac_lines | default({}))[item.where] | default([])) }}"
+      loop: "{{ tac_checks }}"
+      loop_control:
+        label: "{{ item.where }} / {{ item.line }}"
+      tags: [validate, always]
+
+    # Per TACACS server: its own "tacacs server" block and its group member
+    # line. The key is only checked as present.
+    - name: VALIDATE - Check each TACACS server and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'tacacs',
+               'check':    where ~ ' / ' ~ expected,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        s: "{{ item.0 }}"
+        srv_name: "{{ tacacs_server_prefix ~ item.0.ip }}"
+        where: "{{ 'group' if item.1 == 'group' else 'server ' ~ s.ip }}"
+        expected: >-
+          {{ {
+               'header':  'tacacs server ' ~ srv_name,
+               'address': 'address ipv4 ' ~ s.ip,
+               'timeout': 'timeout ' ~ s.timeout,
+               'single':  'single-connection',
+               'key':     'key',
+               'group':   'server name ' ~ srv_name
+             }[item.1] }}
+        haystack: "{{ (tac_lines | default({}))[where] | default([]) }}"
+        found: >-
+          {{ ((haystack | select('match', '^key(\s|$)') | list | length) > 0)
+             if item.1 == 'key'
+             else (expected in haystack) }}
+      loop: >-
+        {{ tacacs_servers | product(['header', 'address', 'timeout', 'single',
+                                     'key', 'group']) | list }}
+      loop_control:
+        label: "{{ item.0.ip }} / {{ item.1 }}"
+      tags: [validate, always]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if tac_failed | length == 0 else 'FAIL' }}
+          ---> tacacs:
+          {{ tac_all | length - tac_failed | length }}
+          of {{ tac_all | length }} present
+          {{ '' if tac_failed | length == 0
+             else '- missing: ' + (tac_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        tac_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'tacacs') | list }}
+        tac_failed: >-
+          {{ tac_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: tac_failed | length > 0
+      tags: [validate, always]

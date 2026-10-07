@@ -2,10 +2,10 @@
 # =============================================================================
 # deploy_interface_templates_no_dot1x.yaml
 #
-#   ansible-playbook deploy_interface_templates_no_dot1x.yaml
-#       -> validate only
-#   ansible-playbook deploy_interface_templates_no_dot1x.yaml --tags deploy
-#       -> deploy, then validate
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
 #
 # NETCONF where the YANG model supports it, CLI where it does not.
 # The two original plays are merged into one; each task carries its own
@@ -22,9 +22,19 @@
 #
 # VALIDATION
 #   Each template is read as its own section, so a line found under one
-#   template cannot satisfy a check for another. The CLI renders the
-#   decimal thresholds as plain integers, which is why the checks below
-#   use "level 10" rather than "level 10.0".
+#   template cannot satisfy a check for another. The expected lines live in
+#   group_vars/access_switches/interface_templates.yaml (template_checks),
+#   written as the switch prints them, e.g. "storm-control broadcast level
+#   10.00". If you change the XML below, update that file too.
+#
+# NETCONF uses error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The loop-guard task (first CLI task after
+#   NETCONF) retries 3 x 10 seconds, and the validation read retries too,
+#   but only when a deploy ran in this run.
 #
 # NOTE: get_filter is required on every NETCONF task. See Cisco bug
 # CSCwk31014.
@@ -39,7 +49,10 @@
     # =========================================================================
     # DEPLOY - skipped unless --tags deploy is given
     # =========================================================================
-    - name: Configure interface templates
+    - name: DEPLOY - Configure the interface templates
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
       ansible.netcommon.netconf_config:
         content: |
           <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -179,116 +192,95 @@
           </filter>
         target: candidate
         commit: true
-      vars:
-        ansible_connection: netconf
-        ansible_port: 830
+        error_option: rollback-on-error
+      register: tmpl_deploy
       tags: [deploy, never]
 
     # "spanning-tree guard loop" does not appear under any template in the
     # YANG model, so it is applied over CLI.
-    - name: Add loop guard to the uplink template
+    # First CLI task after the NETCONF commit: retries while the switch
+    # finishes applying it.
+    - name: DEPLOY - Add loop guard to the uplink template
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
       cisco.ios.ios_config:
         lines:
           - spanning-tree guard loop
         parents: template TRUNK_UPLINK
-      vars:
-        ansible_connection: network_cli
-        ansible_port: 22
       tags: [deploy, never]
+      register: loop_guard
+      until: loop_guard is not failed
+      retries: 3
+      delay: 10
 
     # =========================================================================
     # VALIDATE - runs by default, and after a deploy
     # =========================================================================
-    - name: Read each template as its own section
-      cisco.ios.ios_command:
-        commands:
-          - show running-config all | section ^template TRUNK_FLEX_AP
-          - show running-config all | section ^template TRUNK_UPLINK
-          - show running-config all | section ^template ACCESS_PORT
-      register: tmpl_read
+    - name: VALIDATE - Read each template back as its own section
       vars:
         ansible_connection: network_cli
         ansible_port: 22
+      cisco.ios.ios_command:
+        # Must be in the same order as the templates in template_checks.
+        # "$" anchors each name, so TRUNK_UPLINK cannot also match TRUNK_UPLINK2.
+        commands:
+          - show running-config all | section ^template TRUNK_FLEX_AP$
+          - show running-config all | section ^template TRUNK_UPLINK$
+          - show running-config all | section ^template ACCESS_PORT$
+      register: tmpl_read
+      until: >-
+        tmpl_deploy is not defined
+        or (tmpl_read is not failed
+            and (tmpl_read.stdout | default([]) | select | list | length) == 3)
+      retries: 3
+      delay: 10
+      ignore_errors: true
       changed_when: false
       tags: [validate, always]
 
-    - name: Store each section as trimmed lines
+    - name: VALIDATE - Store each section as trimmed lines
       set_fact:
-        flex_ap_lines: "{{ tmpl_read.stdout_lines[0] | map('trim') | list }}"
-        uplink_lines: "{{ tmpl_read.stdout_lines[1] | map('trim') | list }}"
-        access_lines: "{{ tmpl_read.stdout_lines[2] | map('trim') | list }}"
+        tmpl_lines: >-
+          {{ tmpl_lines | default({})
+             | combine({ item.0: item.1 | map('trim') | list }) }}
+      loop: >-
+        {{ template_checks.keys() | list
+           | zip(tmpl_read.stdout_lines | default([[], [], []])) | list }}
+      loop_control:
+        label: "{{ item.0 }}"
       tags: [validate, always]
 
-    - name: Define what should be in each template
-      set_fact:
-        tmpl_checks:
-          # --- TRUNK_FLEX_AP ---
-          - { tmpl: "TRUNK_FLEX_AP", line: "template TRUNK_FLEX_AP" }
-          - { tmpl: "TRUNK_FLEX_AP", line: "switchport mode trunk" }
-          - { tmpl: "TRUNK_FLEX_AP", line: "switchport nonegotiate" }
-          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control broadcast level 10.00" }
-          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control multicast level 10.00" }
-          - { tmpl: "TRUNK_FLEX_AP", line: "storm-control action trap" }
-          # --- TRUNK_UPLINK ---
-          - { tmpl: "TRUNK_UPLINK", line: "template TRUNK_UPLINK" }
-          - { tmpl: "TRUNK_UPLINK", line: "switchport mode trunk" }
-          - { tmpl: "TRUNK_UPLINK", line: "switchport nonegotiate" }
-          - { tmpl: "TRUNK_UPLINK", line: "storm-control broadcast level 10.00" }
-          - { tmpl: "TRUNK_UPLINK", line: "storm-control multicast level 10.00" }
-          - { tmpl: "TRUNK_UPLINK", line: "storm-control action trap" }
-          - { tmpl: "TRUNK_UPLINK", line: "ip dhcp snooping trust" }
-          - { tmpl: "TRUNK_UPLINK", line: "spanning-tree guard loop" }
-          # --- ACCESS_PORT ---
-          - { tmpl: "ACCESS_PORT", line: "template ACCESS_PORT" }
-          - { tmpl: "ACCESS_PORT", line: "switchport mode access" }
-          - { tmpl: "ACCESS_PORT", line: "switchport nonegotiate" }
-          - { tmpl: "ACCESS_PORT", line: "switchport port-security maximum 3" }
-          - { tmpl: "ACCESS_PORT", line: "switchport port-security aging time 2" }
-          - { tmpl: "ACCESS_PORT", line: "switchport port-security aging type inactivity" }
-          - { tmpl: "ACCESS_PORT", line: "switchport port-security violation restrict" }
-          - { tmpl: "ACCESS_PORT", line: "spanning-tree portfast" }
-          - { tmpl: "ACCESS_PORT", line: "spanning-tree bpduguard enable" }
-          - { tmpl: "ACCESS_PORT", line: "storm-control broadcast level 1.00" }
-          - { tmpl: "ACCESS_PORT", line: "storm-control multicast level 1.00" }
-          - { tmpl: "ACCESS_PORT", line: "storm-control action trap" }
-          - { tmpl: "ACCESS_PORT", line: "load-interval 60" }
-          - { tmpl: "ACCESS_PORT", line: "ip dhcp snooping limit rate 15" }
-          - { tmpl: "ACCESS_PORT", line: "device-tracking attach-policy IPDT_POLICY" }
-      tags: [validate, always]
-
-    - name: Evaluate the checks
+    # item.0.key is the template name, item.1 is one expected line.
+    - name: VALIDATE - Check each template and record the results
       set_fact:
         validation_results: >-
           {{ validation_results | default([]) + [{
                'feature':  'interface templates',
-               'check':    item.tmpl ~ ' / ' ~ item.line,
+               'check':    item.0.key ~ ' / ' ~ item.1,
                'expected': 'present',
-               'actual':   'present' if item.line in haystack else 'missing',
-               'result':   'PASS' if item.line in haystack else 'FAIL'
+               'actual':   'present' if item.1 in (tmpl_lines | default({}))[item.0.key] | default([]) else 'missing',
+               'result':   'PASS' if item.1 in (tmpl_lines | default({}))[item.0.key] | default([]) else 'FAIL'
              }] }}
-      vars:
-        haystack: >-
-          {{ flex_ap_lines if item.tmpl == 'TRUNK_FLEX_AP'
-             else uplink_lines if item.tmpl == 'TRUNK_UPLINK'
-             else access_lines }}
-      loop: "{{ tmpl_checks }}"
+      loop: "{{ template_checks | dict2items | subelements('value') }}"
       loop_control:
-        label: "{{ item.tmpl }} / {{ item.line }}"
+        label: "{{ item.0.key }} / {{ item.1 }}"
       tags: [validate, always]
 
-    - name: Report
+    - name: VALIDATE - Show the result
       debug:
         msg: >-
           {{ 'PASS' if tmpl_failed | length == 0 else 'FAIL' }}
           ---> interface templates:
-          {{ tmpl_checks | length - tmpl_failed | length }}
-          of {{ tmpl_checks | length }} present
+          {{ tmpl_all | length - tmpl_failed | length }}
+          of {{ tmpl_all | length }} present
           {{ '' if tmpl_failed | length == 0
              else '- missing: ' + (tmpl_failed | map(attribute='check') | join('; ')) }}
       vars:
-        tmpl_failed: >-
+        tmpl_all: >-
           {{ validation_results
-             | selectattr('feature', 'equalto', 'interface templates')
-             | selectattr('result', 'equalto', 'FAIL') | list }}
+             | selectattr('feature', 'equalto', 'interface templates') | list }}
+        tmpl_failed: >-
+          {{ tmpl_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: tmpl_failed | length > 0
       tags: [validate, always]
