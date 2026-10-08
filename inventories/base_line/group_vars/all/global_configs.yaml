@@ -1,14 +1,61 @@
+---
+# =============================================================================
 # group_vars/all/global_configs.yaml
+#
+# Used by deploy_globalconfig.yaml. The service lists below drive BOTH the
+# deploy and the validation, so the two cannot drift apart. Write each line
+# exactly as "show running-config all" prints it.
+#
+# To change a list for one group (e.g. keep "service dhcp" on core switches
+# that relay DHCP with ip helper-address), redefine the whole list in that
+# group's group_vars - group_vars/core_switches/ wins over group_vars/all/.
+# =============================================================================
+
+# --- Memory ------------------------------------------------------------------
 memory_low_watermark_processor: 20000
 memory_reserved_critical: 1000
 
+# --- Clock -------------------------------------------------------------------
 timezone_name: "IST"
 timezone_hours: 5
 timezone_minutes: 30
 
+# --- IP and switching limits -------------------------------------------------
 tcp_synwait_time: 10
 icmp_unreachable_rate_limit: 500
 mac_aging_time: 300
-crashinfo_max_files: 2
 
+# --- Boot --------------------------------------------------------------------
 boot_system_image: "bootflash:packages.conf"
+
+# --- Services: turned on (deployed and validated) ----------------------------
+# Log timestamps: datetime is set here. If "service timestamps log uptime"
+# is also configured it replaces this line - use one or the other.
+global_enabled_services:
+  - service nagle
+  - service tcp-keepalives-in
+  - service tcp-keepalives-out
+  - service timestamps debug datetime msec localtime show-timezone
+  - service timestamps log datetime msec localtime show-timezone
+  - service password-encryption
+  - service compress-config
+  - service sequence-numbers
+  - service counters max age 5
+  - service call-home
+
+# --- Services: turned off (deployed and validated) ---------------------------
+global_disabled_services:
+  - no service dhcp
+  - no service pad
+  - no service config
+  - no service internal
+  - no ip finger
+  - no ip source-route
+
+# --- Services: turned off (deployed only, NOT validated) ---------------------
+# Accepted by the switch but never printed in "show running-config all" on
+# Catalyst 9000, so there is nothing to check.
+global_disabled_services_unverifiable:
+  - no service tcp-small-servers
+  - no service udp-small-servers
+  - no ntp allow mode control

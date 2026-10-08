@@ -1,21 +1,18 @@
 ---
 # =============================================================================
-# _gather.yaml
+# gather.yaml
 #
-# Reads each device ONCE and stores the result as facts. Every deploy
-# playbook that follows uses these rather than reading again.
+# Runs first in combined_playbook.yaml, only with --tags validate.
+# Sets up what report.yaml needs at the end of the run:
 #
-# Without this, nineteen playbooks would each pull several thousand lines
-# of running-config per device.
+#   run_ts / run_human   one timestamp for the whole run (report folder name)
+#   dev_facts            parsed "show version" - model, serial, version,
+#                        uptime (shown at the top of each device report)
+#   validation_results   an empty list; every deploy playbook adds its
+#                        PASS/FAIL checks to it
 #
-# Facts set here, available to every later play in the same run:
-#   dev_facts    parsed "show version" - model, serial, version, hostname
-#   cfg          "show running-config all" as a list of trimmed lines
-#   run_ts       one timestamp for the whole run
-#
-# Imported first by site_deploy.yaml. Individual playbooks also gather
-# for themselves if run standalone - see the "when: cfg is not defined"
-# guard in each.
+# Each deploy playbook reads the configuration it needs for itself, so
+# nothing else is read here.
 # =============================================================================
 
 - name: Gather device state
@@ -44,22 +41,9 @@
       changed_when: false
       tags: [validate, never]
 
-    - name: Store the device facts
+    - name: Store the device facts and start an empty results list
       set_fact:
         dev_facts: "{{ showver.parsed.version }}"
-      tags: [validate, never]
-
-    - name: Read the full running configuration
-      cisco.ios.ios_command:
-        commands:
-          - show running-config all
-      register: runcfg
-      changed_when: false
-      tags: [validate, never]
-
-    - name: Store it as trimmed lines
-      set_fact:
-        cfg: "{{ runcfg.stdout_lines[0] | map('trim') | list }}"
         validation_results: []
       tags: [validate, never]
 
@@ -69,5 +53,4 @@
           {{ inventory_hostname }} ({{ ansible_host }})
           {{ dev_facts.chassis }} sn:{{ dev_facts.chassis_sn }}
           {{ dev_facts.version }}
-          - {{ cfg | length }} config lines read
       tags: [validate, never]

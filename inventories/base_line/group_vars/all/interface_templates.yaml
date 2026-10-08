@@ -1,0 +1,53 @@
+---
+# =============================================================================
+# group_vars/access_switches/interface_templates.yaml
+#
+# Used by deploy_interface_templates_no_dot1x.yaml for VALIDATION only.
+# The templates themselves are deployed from the XML in the playbook.
+#
+# One entry per template: the lines that must appear under it, written
+# exactly as "show running-config all | section ^template <NAME>$" prints
+# them (without the leading space). Storm-control levels print with two
+# decimals: 10.0 in the XML -> "level 10.00" here.
+#
+# KEEP IN STEP WITH THE PLAYBOOK
+#   - The templates must be listed in the same order as the three
+#     "show running-config all | section" commands in the playbook:
+#     TRUNK_FLEX_AP, TRUNK_UPLINK, ACCESS_PORT.
+#   - If you change a value in the playbook XML, change it here too.
+# =============================================================================
+
+template_checks:
+
+  TRUNK_FLEX_AP:
+    - switchport mode trunk
+    - switchport nonegotiate
+    - storm-control broadcast level 10.00
+    - storm-control multicast level 10.00
+    - storm-control action trap
+
+  TRUNK_UPLINK:
+    - switchport mode trunk
+    - switchport nonegotiate
+    - storm-control broadcast level 10.00
+    - storm-control multicast level 10.00
+    - storm-control action trap
+    - ip dhcp snooping trust
+    - spanning-tree guard loop          # deployed over CLI, not NETCONF
+
+  ACCESS_PORT:
+    - switchport mode access
+    - switchport nonegotiate
+    - switchport port-security
+    - switchport port-security maximum 3
+    - switchport port-security violation restrict
+    - switchport port-security aging time 2
+    - switchport port-security aging type inactivity
+    - spanning-tree portfast
+    - spanning-tree bpduguard enable
+    - storm-control broadcast level 1.00
+    - storm-control multicast level 1.00
+    - storm-control action trap
+    - load-interval 60
+    - ip dhcp snooping limit rate 15
+    - device-tracking attach-policy IPDT_POLICY

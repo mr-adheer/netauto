@@ -1,17 +1,17 @@
 ---
 # =============================================================================
-# _report.yaml
+# report.yaml
 #
-# Runs last. Turns validation_results - accumulated by every deploy playbook
-# in this run - into report files.
+# Runs last in combined_playbook.yaml, only with --tags validate.
+# Turns validation_results - added to by every deploy playbook in this
+# run - into report files.
 #
 # Output:
-#   playbooks/<folder>/validation/<timestamp>/
+#   playbooks/<model_ver>/validation/<timestamp>/
 #     _summary.txt        one line per device   <- read this
 #     <device>.txt        every check, per device
 #
-# Reports are not committed. Add to .gitignore:
-#   inventories/*/validation/
+# Reports are not committed: "validation/" is in .gitignore.
 # =============================================================================
 
 - name: Write validation reports
@@ -94,7 +94,7 @@
           =======================================================================
           VALIDATION SUMMARY
           =======================================================================
-          Inventory : {{ playbook_dir | basename }}
+          Inventory : {{ inventory_dir | basename }}
           Run       : {{ run_human }}
           Devices   : {{ ansible_play_hosts | length }}
 

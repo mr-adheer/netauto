@@ -2,7 +2,7 @@
 
 # docker build -t netauto:latest .  --> BUILDS A NEW DOCKER IMAGE BASED ON THE "Dockerfile" CONTENTS (DOT '.' IS REQUIRED)
 # docker run -dit --name netauto -v /home/adheer/netauto-repo:/netauto-repo --network host netauto:latest    --> CREATES AND STARTS A NEW CONTAINER FROM SPECIFIED IMAGE "netauto:latest"
-# docker run -dit --name netauto -v /mnt/c/Users/<USENAME>/netauto-repo:/netauto-repo --network host netauto:latest .  --> FOR WINDOWS WSL
+# docker run -dit --name netauto -v /mnt/c/Users/<USERNAME>/netauto-repo:/netauto-repo --network host netauto:latest  --> FOR WINDOWS WSL
 # docker start netauto  --> STARTS/RESTARTS AN EXISTING CONTAINER NAMED "netauto"
 # docker exec -it netauto bash   --> OPENS AN INTERACTIVE BASH SHELL INSIDE THE RUNNING CONTAINER
 
@@ -53,6 +53,7 @@ RUN ansible-galaxy collection install -r /tmp/requirements.yml
 # Working directory where the repo is mounted (must match the docker run -v target)
 WORKDIR /netauto-repo
 
-CMD ["/bin/bash"]
-
+# The repo is mounted from the host (different owner), so let Git trust it
 RUN git config --global --add safe.directory /netauto-repo
+
+CMD ["/bin/bash"]
