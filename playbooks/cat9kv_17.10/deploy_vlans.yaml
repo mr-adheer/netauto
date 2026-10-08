@@ -100,12 +100,12 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store the VLAN table as trimmed lines
       set_fact:
         vlan_lines: "{{ (vlan_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # A line such as "10   USERS   active   Gi1/0/1" must start with the id,
     # then the name (first 32 characters), then a space.
@@ -128,7 +128,7 @@
       loop: "{{ layer2_vlans }}"
       loop_control:
         label: "{{ item.vlan_id }} {{ item.name }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -146,4 +146,4 @@
         vlan_failed: >-
           {{ vlan_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: vlan_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

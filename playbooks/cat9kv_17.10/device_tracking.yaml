@@ -304,7 +304,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store each read as trimmed lines
       set_fact:
@@ -312,7 +312,7 @@
           {{ dict(['global', 'policy', 'cdp list', 'lldp list', 'dhcp list']
                   | zip((dt_read.stdout_lines | default([[], [], [], [], []]))
                         | map('map', 'trim') | map('list'))) }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected lines
       set_fact:
@@ -359,7 +359,7 @@
           - { where: "dhcp list", line: "option name parameter-request-list" }
           - { where: "dhcp list", line: "option name class-identifier" }
           - { where: "dhcp list", line: "option name client-identifier" }
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -376,7 +376,7 @@
       loop: "{{ dt_checks }}"
       loop_control:
         label: "{{ item.where }} / {{ item.line }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -394,4 +394,4 @@
         dt_failed: >-
           {{ dt_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: dt_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

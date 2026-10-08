@@ -237,7 +237,7 @@
       delay: 10
       ignore_errors: true
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store each section as trimmed lines
       set_fact:
@@ -249,7 +249,7 @@
            | zip(tmpl_read.stdout_lines | default([[], [], []])) | list }}
       loop_control:
         label: "{{ item.0 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # item.0.key is the template name, item.1 is one expected line.
     - name: VALIDATE - Check each template and record the results
@@ -265,7 +265,7 @@
       loop: "{{ template_checks | dict2items | subelements('value') }}"
       loop_control:
         label: "{{ item.0.key }} / {{ item.1 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -283,4 +283,4 @@
         tmpl_failed: >-
           {{ tmpl_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: tmpl_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

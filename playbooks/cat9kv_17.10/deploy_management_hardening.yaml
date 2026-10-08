@@ -227,7 +227,7 @@
           - show running-config all | section ^ip access-list standard HTTP_ACL$
       register: hard_read
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Spaces are collapsed as well as trimmed: IOS pads ACL lines for
     # alignment, for example "deny   any".
@@ -237,7 +237,7 @@
         acl_lines:
           MGMT_ACL: "{{ hard_read.stdout_lines[1] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
           HTTP_ACL: "{{ hard_read.stdout_lines[2] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected HTTP and SSH lines
       set_fact:
@@ -253,7 +253,7 @@
                'ip ssh authentication-retries ' ~ ssh_auth_retries,
                'ip ssh rsa keypair-name ' ~ ssh_rsa_key_label
              ] + ssh_server_algorithms }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the HTTP and SSH settings and record the results
       set_fact:
@@ -268,7 +268,7 @@
       loop: "{{ svc_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # One check per ACL entry, built from the same variables the deploy uses.
     # A wildcard of 0.0.0.0 is printed by IOS as the bare address.
@@ -294,7 +294,7 @@
            | subelements('entries') }}
       loop_control:
         label: "{{ item.0.name }} / {{ item.1.sequence }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -312,4 +312,4 @@
         hard_failed: >-
           {{ hard_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: hard_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

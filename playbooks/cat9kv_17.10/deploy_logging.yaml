@@ -128,12 +128,12 @@
           - show running-config all | include ^logging |^no logging
       register: log_read
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store the output as trimmed lines
       set_fact:
         log_lines: "{{ log_read.stdout_lines[0] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected logging lines
       set_fact:
@@ -145,7 +145,7 @@
           - "logging trap {{ logging_trap_level }}"
           - "logging snmp-authfail"
           - "logging source-interface {{ logging_source_interface }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the logging settings and record the results
       set_fact:
@@ -160,7 +160,7 @@
       loop: "{{ log_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # One check per syslog server, from the same variable the deploy uses.
     - name: VALIDATE - Check each syslog host and record the results
@@ -178,7 +178,7 @@
       loop: "{{ syslog_servers }}"
       loop_control:
         label: "{{ item.address }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -196,4 +196,4 @@
         log_failed: >-
           {{ log_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: log_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

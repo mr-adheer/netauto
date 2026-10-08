@@ -150,13 +150,13 @@
           - show running-config all | section ^kron
       register: arch_read
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store each section as trimmed lines
       set_fact:
         archive_lines: "{{ arch_read.stdout_lines[0] | map('trim') | list }}"
         kron_lines: "{{ arch_read.stdout_lines[1] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected archive and kron lines
       set_fact:
@@ -178,7 +178,7 @@
           - "policy-list CONFIGURATION_BACKUP"
           - "cli write"
           - "cli archive config"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the archive settings and record the results
       set_fact:
@@ -193,7 +193,7 @@
       loop: "{{ archive_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the kron settings and record the results
       set_fact:
@@ -208,7 +208,7 @@
       loop: "{{ kron_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -226,4 +226,4 @@
         arch_failed: >-
           {{ arch_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: arch_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

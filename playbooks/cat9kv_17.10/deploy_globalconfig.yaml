@@ -249,12 +249,12 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store the output as trimmed lines
       set_fact:
         glob_lines: "{{ (glob_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # The service lists come from group_vars; the rest are built from the
     # same variables the deploy tasks use.
@@ -274,7 +274,7 @@
                  'software auto-upgrade enable',
                  'boot system switch all ' ~ boot_system_image
                ] }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -289,7 +289,7 @@
       loop: "{{ glob_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -307,4 +307,4 @@
         glob_failed: >-
           {{ glob_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: glob_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

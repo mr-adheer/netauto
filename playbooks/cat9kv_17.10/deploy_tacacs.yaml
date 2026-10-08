@@ -409,7 +409,7 @@
              + (tacacs_servers | map(attribute='ip')
                 | map('regex_replace', '^(.*)$', 'show running-config all | section ^tacacs server ' ~ tacacs_server_prefix ~ '\1$')
                 | list) }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Retries only when a deploy ran in this run (tacacs_deploy is defined),
     # until every read returns something.
@@ -429,7 +429,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store each read as trimmed lines
       set_fact:
@@ -440,7 +440,7 @@
       loop_control:
         label: "{{ item.0 }}"
       no_log: true
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Only the TACACS-specific lines. The default method lists, fail-message
     # and the rest of the VTY settings are checked by deploy_local_aaa.yaml.
@@ -461,7 +461,7 @@
           - { where: vty,    line: "authorization exec {{ tacacs_author_list }}" }
           - { where: vty,    line: "authorization commands 7 {{ tacacs_cmds_list }}" }
           - { where: vty,    line: "authorization commands 15 {{ tacacs_cmds_list }}" }
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -478,7 +478,7 @@
       loop: "{{ tac_checks }}"
       loop_control:
         label: "{{ item.where }} / {{ item.line }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Per TACACS server: its own "tacacs server" block and its group member
     # line. The key is only checked as present.
@@ -515,7 +515,7 @@
                                      'key', 'group']) | list }}
       loop_control:
         label: "{{ item.0.ip }} / {{ item.1 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -533,4 +533,4 @@
         tac_failed: >-
           {{ tac_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: tac_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

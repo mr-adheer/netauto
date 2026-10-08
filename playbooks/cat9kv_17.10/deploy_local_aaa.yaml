@@ -330,7 +330,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store each section as trimmed lines
       set_fact:
@@ -338,7 +338,7 @@
         acl_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[1] | map('trim') | list }}"
         con_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[2] | map('trim') | list }}"
         vty_lines: "{{ (aaa_read.stdout_lines | default([[], [], [], []]))[3] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected lines
       set_fact:
@@ -383,7 +383,7 @@
           - { where: "line vty 0 15", line: "transport input ssh" }
           - { where: "line vty 0 15", line: "transport output none" }
           - { where: "line vty 0 15", line: "transport preferred none" }
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -404,7 +404,7 @@
       loop: "{{ aaa_checks }}"
       loop_control:
         label: "{{ item.where }} / {{ item.line }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -421,4 +421,4 @@
              | selectattr('feature', 'equalto', 'local aaa')
              | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: aaa_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

@@ -6,7 +6,7 @@
 # in this run - into report files.
 #
 # Output:
-#   playbooks/<folder>/validation/<timestamp>/
+#   inventories/<customer>/validation/<timestamp>/
 #     _summary.txt        one line per device   <- read this
 #     <device>.txt        every check, per device
 #

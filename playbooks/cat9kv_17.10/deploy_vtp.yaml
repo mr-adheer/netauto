@@ -100,7 +100,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Picks the values after the colon, e.g.
     #   VTP Operating Mode                : Transparent
@@ -115,7 +115,7 @@
           {{ (vtp_read.stdout[0] | default('')
               | regex_search('VTP Domain Name\s*:[ \t]*(\S*)', '\1', multiline=True)
               | default([''], true))[0] }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the VTP mode and domain and record the results
       set_fact:
@@ -139,7 +139,7 @@
               if vtp_domain_name is defined else []) }}
       loop_control:
         label: "{{ item.check }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -156,4 +156,4 @@
         vtp_failed: >-
           {{ vtp_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: vtp_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

@@ -89,19 +89,19 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store the output as trimmed lines
       set_fact:
         dns_lines: "{{ (dns_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected lines
       set_fact:
         dns_checks:
           - "no ip domain lookup"
           - "ip domain name {{ domain_name }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -116,7 +116,7 @@
       loop: "{{ dns_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # The name servers may be on one line or on separate lines, so each
     # address is looked for as a whole word in the "ip name-server" lines.
@@ -140,7 +140,7 @@
         - "{{ dns_server_ip_2 }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -158,4 +158,4 @@
         dns_failed: >-
           {{ dns_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: dns_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

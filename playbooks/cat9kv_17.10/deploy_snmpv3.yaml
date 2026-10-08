@@ -312,7 +312,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     # The user's block in "show snmp user" is everything from its
     # "User name:" line to the next one.
@@ -325,7 +325,7 @@
               | regex_replace('\r', '')).split('User name: ')
              | select('match', (snmp_user_name | regex_escape) ~ '\s*\n')
              | first | default('') }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected lines
       set_fact:
@@ -345,7 +345,7 @@
                'process cpu statistics limit entry-percentage ' ~ cpu_stats_entry_percentage
                  ~ ' size ' ~ cpu_stats_size
              ] }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each line and record the results
       set_fact:
@@ -360,7 +360,7 @@
       loop: "{{ snmp_checks }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # A standard ACL prints a host without the word "host":
     #   10 permit 10.1.1.50 log
@@ -382,7 +382,7 @@
       loop: "{{ snmp_acl_entries }}"
       loop_control:
         label: "{{ item.sequence }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Passwords are not checked - only the user, its group and its protocols.
     - name: VALIDATE - Check the SNMPv3 user and record the results
@@ -407,7 +407,7 @@
         - "Privacy Protocol: AES128"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -425,4 +425,4 @@
         snmp_failed: >-
           {{ snmp_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: snmp_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

@@ -208,14 +208,14 @@
       delay: 10
       ignore_errors: true
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Spaces are collapsed as well as trimmed, because IOS pads ACL lines.
     - name: VALIDATE - Store the output as normalised lines
       set_fact:
         ntp_lines: "{{ ntp_read.stdout_lines[0] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
         ntp_acl_lines: "{{ ntp_read.stdout_lines[1] | map('trim') | map('regex_replace', '\\s+', ' ') | list }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Define the expected NTP lines
       set_fact:
@@ -229,7 +229,7 @@
                   {'mode': 'prefix', 'line': 'ntp authentication-key 1 md5'},
                   {'mode': 'exact',  'line': 'ntp trusted-key 1'}
                 ] if ntp_authentication_enabled | bool else []) }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the NTP settings and record the results
       set_fact:
@@ -249,7 +249,7 @@
       loop: "{{ ntp_checks }}"
       loop_control:
         label: "{{ item.line }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # One check per server, from the same variables the deploy uses.
     # Prefix match, so trailing options the device adds do not fail it.
@@ -274,7 +274,7 @@
            else ntp_settings_no_auth.servers }}
       loop_control:
         label: "{{ item.ip }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # One check per ACL entry. IOS prints a single host as the bare address.
     - name: VALIDATE - Check every NTP ACL entry and record the results
@@ -294,7 +294,7 @@
       loop: "{{ ntp_acl_entries }}"
       loop_control:
         label: "{{ item.sequence }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -311,4 +311,4 @@
         ntp_failed: >-
           {{ ntp_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: ntp_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

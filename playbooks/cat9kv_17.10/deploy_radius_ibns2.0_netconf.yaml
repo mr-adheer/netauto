@@ -971,7 +971,7 @@
                 | map('regex_replace', '^(.*)$', 'show running-config all | section ^radius server RADIUS_\1$') | list)
              + (ibns_class_maps | map(attribute='name')
                 | map('regex_replace', '^(.*)$', 'show running-config all | section ^class-map type control subscriber .* \1$') | list) }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Retries only when a deploy ran in this run (ibns_deploy is defined),
     # until every read returns something.
@@ -991,7 +991,7 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Lines are trimmed and repeated spaces collapsed (ACL lines are padded).
     - name: VALIDATE - Store each read as trimmed lines
@@ -1003,7 +1003,7 @@
       loop_control:
         label: "{{ item.0 }}"
       no_log: true
-      tags: [validate, always]
+      tags: [validate, never]
 
     # mode: exact   the whole line must match
     # mode: prefix  the line must START with this text - used where the line
@@ -1044,7 +1044,7 @@
                {'where': 'svc',    'mode': 'exact', 'line': 'service-template CRITICAL_VOICE_ACCESS'},
                {'where': 'svc',    'mode': 'exact', 'line': 'voice vlan'}
              ] }}
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the global, group, ACL and template lines and record the results
       set_fact:
@@ -1065,7 +1065,7 @@
       loop: "{{ ibns_checks }}"
       loop_control:
         label: "{{ item.where }} / {{ item.line }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check the web auth redirect ACL entries and record the results
       set_fact:
@@ -1082,7 +1082,7 @@
       loop: "{{ web_auth_acl_lines }}"
       loop_control:
         label: "{{ item }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Per RADIUS server: its own "radius server" block, its group member line
     # and its dynamic-author client. Keys are only checked as present.
@@ -1121,7 +1121,7 @@
                                      'tester', 'key', 'group', 'dynauth']) | list }}
       loop_control:
         label: "{{ item.0.ip }} / {{ item.1 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Each class map is read as its own section, so "match method dot1x"
     # under DOT1X cannot satisfy the check for DOT1X_FAILED.
@@ -1140,7 +1140,7 @@
       loop: "{{ ibns_class_maps | subelements('lines') }}"
       loop_control:
         label: "{{ item.0.name }} / {{ item.1 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check each class map header and record the results
       set_fact:
@@ -1158,7 +1158,7 @@
       loop: "{{ ibns_class_maps }}"
       loop_control:
         label: "{{ item.name }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # The same action lines (e.g. "10 terminate dot1x") appear under several
     # classes, so each EVENT is checked as one block: the event line, then
@@ -1180,7 +1180,7 @@
       loop: "{{ ibns_policy }}"
       loop_control:
         label: "{{ item.event }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -1198,4 +1198,4 @@
         ibns_failed: >-
           {{ ibns_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: ibns_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

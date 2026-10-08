@@ -139,13 +139,13 @@
         ansible_connection: network_cli
         ansible_port: 22
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Store the VLAN table as trimmed lines
       set_fact:
         vlan_lines: "{{ (svi_read.stdout_lines | default([[]]))[0] | map('trim') | list }}"
         svi_sections: {}
-      tags: [validate, always]
+      tags: [validate, never]
 
     # Pairs each VLAN id with its own section output.
     - name: VALIDATE - Store each SVI section as trimmed lines
@@ -157,7 +157,7 @@
            | zip((svi_read.stdout_lines | default([]))[1:]) | list }}
       loop_control:
         label: "Vlan{{ item.0 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     # One result per SVI and check type. The expected line is built from the
     # same svis values the deploy used.
@@ -193,7 +193,7 @@
                            'unreachables', 'proxy_arp']) | list }}
       loop_control:
         label: "Vlan{{ item.0.vlan_id }} / {{ item.1 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -211,4 +211,4 @@
         svi_failed: >-
           {{ svi_all | selectattr('result', 'equalto', 'FAIL') | list }}
       changed_when: svi_failed | length > 0
-      tags: [validate, always]
+      tags: [validate, never]

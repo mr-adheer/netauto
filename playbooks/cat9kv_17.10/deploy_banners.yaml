@@ -131,13 +131,13 @@
       # MISSING in the report rather than stopping the play.
       ignore_errors: true
       changed_when: false
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Check whether each banner is present
       set_fact:
         exec_banner_ok: "{{ (banner_read.stdout[0] | default('') | trim) | length > 0 }}"
         login_banner_ok: "{{ (banner_read.stdout[1] | default('') | trim) | length > 0 }}"
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Show the result
       debug:
@@ -147,7 +147,7 @@
           exec={{ 'present' if exec_banner_ok | bool else 'MISSING' }},
           login={{ 'present' if login_banner_ok | bool else 'MISSING' }}
       changed_when: not (exec_banner_ok | bool and login_banner_ok | bool)
-      tags: [validate, always]
+      tags: [validate, never]
 
     - name: VALIDATE - Record the results
       set_fact:
@@ -168,4 +168,4 @@
                  'result':   'PASS' if login_banner_ok | bool else 'FAIL'
                }
              ] }}
-      tags: [validate, always]
+      tags: [validate, never]
