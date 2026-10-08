@@ -1,51 +1,74 @@
-# Network Automation Repo
+# netauto-repo
 
-## Structure
+Ansible automation for building and checking Cisco Catalyst access switches.
+Configuration is pushed over **NETCONF** (YANG) where the model allows it and
+over **CLI** where it does not. Every deploy playbook also **validates** what it
+pushed, and the results are written to a pass/fail report.
+
+Tested on Catalyst 9000 (Cat9kv), IOS-XE 17.10.
+
+## What's in the repo
 
 ```
-inventories/<customer>/
-  hosts.yml              # device list + groups + connection settings
-  group_vars/
-    all.yml               # settings shared by ALL of this customer's devices
-    <role>.yml             # settings shared by devices in one role (e.g. access_switches)
-  host_vars/
-    <device>.yml            # settings unique to ONE device (VLANs, interfaces, IP, hostname)
-
-templates/
-  Only for CLI features with NO Cisco resource module equivalent.
-  Keep these small, isolated, and lab-tested before use - a bug here
-  affects every device that uses it.
-
-playbooks/
-  One playbook per deployment type (e.g. deploy_switch.yml).
-  Prefer Cisco resource modules (cisco.ios.*) over raw templates
-  wherever a module exists for the feature.
-
-validation/
-  testbeds/   pyATS testbed files describing the lab/device topology
-  tests/      pre/post-change validation scripts (pyATS/Genie)
+ansible.cfg              Ansible settings for this repo
+Dockerfile               Builds the control-node container (Ubuntu 24.04)
+requirements.txt         Pinned Python packages (Ansible, pyATS, ncclient, ...)
+requirements.yml         Pinned Ansible collections (cisco.ios, netcommon, utils)
+inventories/<site>/      hosts.yaml, group_vars, host_vars, encrypted vault
+playbooks/<model_ver>/   Playbooks tested on that platform, e.g. cat9kv_17.10
 ```
 
-## Running a deployment
+| Playbooks | Purpose |
+|---|---|
+| `deploy_*.yaml` | Configure one feature (NTP, AAA, banners, VLANs, ...) and check it |
+| `gather.yaml` | Reads device facts once per run, for the report |
+| `report.yaml` | Writes the pass/fail report to `validation/<timestamp>/` |
+| `combined_playbook.yaml` | Runs gather, the deploy playbooks and report in order |
+| `get_*.yaml` | Read-only data collection (inventory, port status, L3 interfaces, ...) to CSV in `get_reports/<timestamp>/` |
+
+## Quick start
 
 ```bash
-ansible-playbook -i inventories/customerA/hosts.yml playbooks/deploy_switch.yml
+git clone https://github.com/mr-adheer/netauto-repo.git
+cd netauto-repo
+docker build -t netauto:latest .
+docker run -dit --name netauto -v $HOME/netauto-repo:/netauto-repo netauto:latest
+docker exec -it netauto bash
+
+cd /netauto-repo
+INV=inventories/base_line/hosts.yaml
+PB=playbooks/cat9kv_17.10
 ```
 
-## Adding a new device
+Each switch needs SSH, NETCONF and a privilege-15 user configured by console
+first (see the guide).
 
-1. Add it to `inventories/<customer>/hosts.yml` under the right group.
-2. Create `inventories/<customer>/host_vars/<device>.yml` with its VLANs,
-   interfaces, hostname, and management IP.
-3. Nothing else needs to change - it automatically inherits the shared
-   `group_vars/all.yml` and role-level `group_vars/<role>.yml` settings.
+## Running playbooks
 
-## Rule of thumb
+All deploy, gather and report tasks are tagged `never`, so **nothing runs
+without a tag**:
 
-- Standard, common features (VLANs, interfaces, NTP, hostname, etc.) ->
-  use a Cisco resource module. No template needed.
-- A feature with no resource module -> small, isolated Jinja2 template
-  in `templates/`, reviewed and lab-tested before use.
-- Any logic beyond simple substitution (counters, multi-condition branching,
-  calculations) -> belongs in a pre-processing Python script, not in YAML
-  or Jinja2 directly.
+| Command | What it does |
+|---|---|
+| `--tags validate` | Checks the switches, changes nothing |
+| `--tags deploy` | Pushes configuration only |
+| `--tags deploy,validate` | Pushes configuration, then checks it |
+
+```bash
+# Audit a whole site
+ansible-playbook -i $INV $PB/combined_playbook.yaml --tags validate --ask-vault-pass
+
+# Build one switch and check it
+ansible-playbook -i $INV $PB/combined_playbook.yaml --tags deploy,validate \
+  --limit blr-flr1-acc-sw01 --ask-vault-pass
+
+# Collect a hardware inventory (get_ playbooks run without tags)
+ansible-playbook -i $INV $PB/get_inventory.yaml --ask-vault-pass
+```
+
+## Notes
+
+- Secrets live in an encrypted `vault.yaml`. Never commit the vault password.
+- `validation/` and `get_reports/` are kept out of Git.
+- Full details are in the guide: *Network Automation Playbook Guide - Layer 2
+  Switch Deployments with Ansible and pyATS*.
