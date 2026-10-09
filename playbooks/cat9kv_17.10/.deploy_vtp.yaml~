@@ -2,7 +2,7 @@
 # =============================================================================
 # deploy_vtp.yaml
 #
-#   ansible-playbook <playbook>.yaml --tags validate   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
 #   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
 #   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #

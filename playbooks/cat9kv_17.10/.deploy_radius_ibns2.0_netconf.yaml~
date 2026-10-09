@@ -2,7 +2,7 @@
 # =============================================================================
 # deploy_radius_ibns2_netconf.yaml    (IOS-XE 17.12.6 / 17.16.1 or later ONLY)
 #
-#   ansible-playbook <playbook>.yaml --tags validate   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> validate only
 #   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
 #   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
 #

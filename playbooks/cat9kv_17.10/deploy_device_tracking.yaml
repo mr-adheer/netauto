@@ -1,0 +1,397 @@
+---
+# =============================================================================
+# device_tracking.yaml
+#
+#   ansible-playbook <playbook>.yaml --tags validate   -> validate only
+#   ansible-playbook <playbook>.yaml --tags deploy   -> deploy only
+#   ansible-playbook <playbook>.yaml --tags deploy,validate   -> deploy and then validate
+#
+# Device tracking, device sensor, errdisable recovery, CDP/LLDP.
+# NETCONF where the YANG model supports it, CLI where it does not.
+#
+# CLI fallback required for:
+#   - device-sensor accounting        (no YANG element)
+#   - cdp run                         (no YANG element - lldp has one, cdp does not)
+#   - errdisable recovery cause all / interval   (no YANG element)
+#
+# Variables (group_vars):
+#   errdisable_recovery_interval      seconds, e.g. 300
+#
+# NETCONF tasks use error_option: rollback-on-error, so a failed edit leaves
+# nothing behind in the candidate datastore.
+#
+# WHY SOME TASKS RETRY
+#   IOS-XE applies a NETCONF commit in the background and refuses CLI
+#   configuration while it does. The first CLI task after the NETCONF tasks
+#   retries (3 x 10 seconds), and the validation read retries too, but only
+#   when a deploy ran in this run.
+#
+# VALIDATION
+#   The policy and each device-sensor filter list are read as their own
+#   sections, so a "tlv name ..." line under one list cannot satisfy a check
+#   for another. "errdisable recovery cause all" is not shown by the switch -
+#   it prints one "errdisable recovery cause X" line per cause - so the
+#   individual causes are checked instead.
+#   Never run on a switch yet: on the first lab run, compare any FAIL with
+#   "show running-config all" and correct the check if the switch simply
+#   prints the line differently.
+#
+# NOTE: get_filter is required on every NETCONF task. See Cisco bug
+# CSCwk31014.
+# =============================================================================
+
+- name: Configure and validate device tracking, device sensor, errdisable and CDP/LLDP
+  hosts: access_switches
+  gather_facts: false
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOY - skipped unless --tags deploy is given
+    # =========================================================================
+    - name: DEPLOY - Configure device tracking
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-tracking>
+                <tracking xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-tracking">
+                  <auto-source/>
+                </tracking>
+                <policy xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-tracking">
+                  <word>IPDT_POLICY</word>
+                  <tracking>
+                    <enable-tracking/>
+                  </tracking>
+                  <protocol>
+                    <proto-udp>
+                      <udp>false</udp>
+                    </proto-udp>
+                  </protocol>
+                </policy>
+              </device-tracking>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-tracking/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      register: dt_deploy
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure the device sensor filter lists and specs
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-sensor xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-sensor">
+                <notify>
+                  <all-changes/>
+                </notify>
+                <filter-list>
+                  <cdp>
+                    <list>
+                      <name>CDP_LIST</name>
+                      <tlv>
+                        <name>
+                          <device-name/>
+                          <address-type/>
+                          <capabilities-type/>
+                          <platform-type/>
+                          <version-type/>
+                        </name>
+                      </tlv>
+                    </list>
+                  </cdp>
+                  <lldp>
+                    <list>
+                      <name>LLDP_LIST</name>
+                      <tlv>
+                        <name>
+                          <system-name/>
+                          <system-description/>
+                          <system-capabilities/>
+                        </name>
+                      </tlv>
+                    </list>
+                  </lldp>
+                  <dhcp>
+                    <list>
+                      <name>DHCP_LIST</name>
+                      <option>
+                        <name>
+                          <host-name/>
+                          <default-ip-ttl/>
+                          <requested-address/>
+                          <parameter-request-list/>
+                          <class-identifier/>
+                          <client-identifier/>
+                        </name>
+                      </option>
+                    </list>
+                  </dhcp>
+                </filter-list>
+                <filter-spec>
+                  <cdp>
+                    <include>
+                      <list>
+                        <name>CDP_LIST</name>
+                      </list>
+                    </include>
+                  </cdp>
+                  <lldp>
+                    <include>
+                      <list>
+                        <name>LLDP_LIST</name>
+                      </list>
+                    </include>
+                  </lldp>
+                  <dhcp>
+                    <include>
+                      <list>
+                        <name>DHCP_LIST</name>
+                      </list>
+                    </include>
+                  </dhcp>
+                </filter-spec>
+              </device-sensor>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <device-sensor xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-device-sensor"/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: DEPLOY - Enable LLDP globally
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <lldp xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-lldp">
+                <run/>
+              </lldp>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <lldp xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-lldp"/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    - name: DEPLOY - Configure errdisable recovery causes
+      ansible.netcommon.netconf_config:
+        content: |
+          <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <errdisable>
+                <recovery>
+                  <cause>
+                    <arp-inspection/>
+                    <bpduguard/>
+                    <channel-misconfig/>
+                    <dhcp-rate-limit/>
+                    <dtp-flap/>
+                    <gbic-invalid/>
+                    <inline-power/>
+                    <l2ptguard/>
+                    <link-flap/>
+                    <link-monitor-failure/>
+                  </cause>
+                </recovery>
+              </errdisable>
+            </native>
+          </config>
+        get_filter: |
+          <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+              <errdisable/>
+            </native>
+          </filter>
+        target: candidate
+        commit: true
+        error_option: rollback-on-error
+      vars:
+        ansible_connection: netconf
+        ansible_port: 830
+      tags: [deploy, never]
+
+    # --- CLI ---------------------------------------------------------------
+    # No YANG element exists for device-sensor accounting.
+    # First CLI task after the NETCONF commits: retries while the switch
+    # finishes applying them.
+    - name: DEPLOY - Enable device-sensor accounting
+      cisco.ios.ios_config:
+        lines:
+          - device-sensor accounting
+      register: dt_cli_first
+      until: dt_cli_first is not failed
+      retries: 3
+      delay: 10
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # cdp has no YANG element (lldp does, cdp does not).
+    - name: DEPLOY - Enable CDP globally
+      cisco.ios.ios_config:
+        lines:
+          - cdp run
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # "errdisable recovery cause all" and the interval are not represented in
+    # the model - only individual causes are.
+    - name: DEPLOY - Configure errdisable recovery cause all and interval
+      cisco.ios.ios_config:
+        lines:
+          - errdisable recovery cause all
+          - "errdisable recovery interval {{ errdisable_recovery_interval }}"
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      tags: [deploy, never]
+
+    # =========================================================================
+    # VALIDATE - runs by default, and after a deploy
+    # =========================================================================
+    # Retries only when a deploy ran in this run (dt_deploy is defined),
+    # until every read returns something.
+    - name: VALIDATE - Read the configuration back, retries after deploy
+      cisco.ios.ios_command:
+        commands:
+          - show running-config all | include ^device-tracking tracking|^device-sensor|^errdisable recovery|^cdp run|^lldp run
+          - show running-config all | section ^device-tracking policy IPDT_POLICY$
+          - show running-config all | section ^device-sensor filter-list cdp list CDP_LIST$
+          - show running-config all | section ^device-sensor filter-list lldp list LLDP_LIST$
+          - show running-config all | section ^device-sensor filter-list dhcp list DHCP_LIST$
+      register: dt_read
+      until: >-
+        dt_deploy is not defined
+        or (dt_read is not failed
+            and (dt_read.stdout | default([]) | select | list | length) == 5)
+      retries: 3
+      delay: 10
+      ignore_errors: true
+      vars:
+        ansible_connection: network_cli
+        ansible_port: 22
+      changed_when: false
+      tags: [validate, never]
+
+    - name: VALIDATE - Store each read as trimmed lines
+      set_fact:
+        dt_lines: >-
+          {{ dict(['global', 'policy', 'cdp list', 'lldp list', 'dhcp list']
+                  | zip((dt_read.stdout_lines | default([[], [], [], [], []]))
+                        | map('map', 'trim') | map('list'))) }}
+      tags: [validate, never]
+
+    - name: VALIDATE - Define the expected lines
+      set_fact:
+        dt_checks:
+          # --- global ---
+          - { where: "global", line: "device-tracking tracking auto-source" }
+          - { where: "global", line: "device-sensor accounting" }
+          - { where: "global", line: "device-sensor notify all-changes" }
+          - { where: "global", line: "device-sensor filter-spec cdp include list CDP_LIST" }
+          - { where: "global", line: "device-sensor filter-spec lldp include list LLDP_LIST" }
+          - { where: "global", line: "device-sensor filter-spec dhcp include list DHCP_LIST" }
+          - { where: "global", line: "cdp run" }
+          - { where: "global", line: "lldp run" }
+          - { where: "global", line: "errdisable recovery interval {{ errdisable_recovery_interval }}" }
+          - { where: "global", line: "errdisable recovery cause arp-inspection" }
+          - { where: "global", line: "errdisable recovery cause bpduguard" }
+          - { where: "global", line: "errdisable recovery cause channel-misconfig" }
+          - { where: "global", line: "errdisable recovery cause dhcp-rate-limit" }
+          - { where: "global", line: "errdisable recovery cause dtp-flap" }
+          - { where: "global", line: "errdisable recovery cause gbic-invalid" }
+          - { where: "global", line: "errdisable recovery cause inline-power" }
+          - { where: "global", line: "errdisable recovery cause l2ptguard" }
+          - { where: "global", line: "errdisable recovery cause link-flap" }
+          - { where: "global", line: "errdisable recovery cause link-monitor-failure" }
+          # --- device-tracking policy ---
+          - { where: "policy", line: "device-tracking policy IPDT_POLICY" }
+          - { where: "policy", line: "tracking enable" }
+          - { where: "policy", line: "no protocol udp" }
+          # --- device-sensor filter lists ---
+          - { where: "cdp list", line: "device-sensor filter-list cdp list CDP_LIST" }
+          - { where: "cdp list", line: "tlv name device-name" }
+          - { where: "cdp list", line: "tlv name address-type" }
+          - { where: "cdp list", line: "tlv name capabilities-type" }
+          - { where: "cdp list", line: "tlv name platform-type" }
+          - { where: "cdp list", line: "tlv name version-type" }
+          - { where: "lldp list", line: "device-sensor filter-list lldp list LLDP_LIST" }
+          - { where: "lldp list", line: "tlv name system-name" }
+          - { where: "lldp list", line: "tlv name system-description" }
+          - { where: "lldp list", line: "tlv name system-capabilities" }
+          - { where: "dhcp list", line: "device-sensor filter-list dhcp list DHCP_LIST" }
+          - { where: "dhcp list", line: "option name host-name" }
+          - { where: "dhcp list", line: "option name default-ip-ttl" }
+          - { where: "dhcp list", line: "option name requested-address" }
+          - { where: "dhcp list", line: "option name parameter-request-list" }
+          - { where: "dhcp list", line: "option name class-identifier" }
+          - { where: "dhcp list", line: "option name client-identifier" }
+      tags: [validate, never]
+
+    - name: VALIDATE - Check each line and record the results
+      set_fact:
+        validation_results: >-
+          {{ validation_results | default([]) + [{
+               'feature':  'device tracking',
+               'check':    item.where ~ ' / ' ~ item.line,
+               'expected': 'present',
+               'actual':   'present' if found else 'missing',
+               'result':   'PASS' if found else 'FAIL'
+             }] }}
+      vars:
+        found: "{{ item.line in (dt_lines[item.where] | default([])) }}"
+      loop: "{{ dt_checks }}"
+      loop_control:
+        label: "{{ item.where }} / {{ item.line }}"
+      tags: [validate, never]
+
+    - name: VALIDATE - Show the result
+      debug:
+        msg: >-
+          {{ 'PASS' if dt_failed | length == 0 else 'FAIL' }}
+          ---> device tracking:
+          {{ dt_all | length - dt_failed | length }}
+          of {{ dt_all | length }} present
+          {{ '' if dt_failed | length == 0
+             else '- missing: ' + (dt_failed | map(attribute='check') | join('; ')) }}
+      vars:
+        dt_all: >-
+          {{ validation_results
+             | selectattr('feature', 'equalto', 'device tracking') | list }}
+        dt_failed: >-
+          {{ dt_all | selectattr('result', 'equalto', 'FAIL') | list }}
+      changed_when: dt_failed | length > 0
+      tags: [validate, never]
